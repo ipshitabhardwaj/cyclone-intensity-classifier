@@ -1,0 +1,32 @@
+# Config for training on the COMBINED real-data pool: the 136-image Kaggle
+# set + 680 HURSAT-B1 frames across 10 real North Indian Ocean storms
+# (2008-2016, fills the D/DD/CS categories the Kaggle set was thin on) +
+# 216 frames of Cyclone Amphan (2020) from a real MOSDAC order (fills the
+# Super Cyclonic Storm category the other two barely have). See
+# src/train_combined.py for why validation is a storm-held-out split, not
+# a random one, and why Amphan goes entirely into training.
+
+data:
+  kaggle_root: data/kaggle_insat3d
+  hursat_root: data/hursat_processed
+  mosdac_root: data/mosdac_processed
+  img_size: 128
+  seed: 42
+
+model:
+  backbone: efficientnet_b0
+  pretrained: true
+  num_classes: 8           # IMD intensity categories, see src/utils.py
+  num_reg_outputs: 1        # wind speed only
+
+train:
+  batch_size: 16            # bumped from 8 (config_real.yaml) -- 1032 samples vs 136 supports it
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0003
+  loss_weights:
+    cls: 1.0
+    reg: 0.5
+  num_workers: 0
+  checkpoint_dir: checkpoints_combined
+  log_path: outputs_combined/train_log.csv

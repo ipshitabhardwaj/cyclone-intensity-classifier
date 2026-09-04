@@ -1,0 +1,24 @@
+# Raw downloaded archives -- only needed once, to build the processed data
+# below. Never needed again once data/hursat_processed and
+# data/mosdac_processed exist. See PROJECT_OVERVIEW.md section 6.
+hursat_raw/
+mosdac_amphan/
+
+# Old synthetic-data experiments, not part of the real-data pipeline
+data/cyinsat/
+
+# Python / editor / OS cruft
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+outputs/
+outputs_real/
+
+# Scratch transfer bundles created while moving data between environments
+# during development -- not part of the project itself
+data/_hursat_processed_transfer.tar.gz
+data/mosdac_processed_transfer.tar.gz
+archive/_bundle.tar.gz
+data/hursat_processed_test/

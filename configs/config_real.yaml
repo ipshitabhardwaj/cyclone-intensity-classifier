@@ -1,0 +1,30 @@
+# Config for training on the REAL Kaggle dataset (not synthetic):
+# "INSAT3D Infrared & Raw Cyclone Imagery (2012-2021)" by Sshubam Verma.
+# Only 136 labeled images total -- see README's "Real-data run" section for
+# what that does and doesn't prove.
+
+data:
+  root: archive
+  img_size: 128
+  val_split: 0.2          # fraction of IMAGES (no storm ids exist in this dataset -- see kaggle_dataset.py)
+  seed: 42
+
+model:
+  backbone: efficientnet_b0
+  pretrained: true         # ImageNet weights matter a lot at this dataset's size (109 train images).
+                            # If the download fails on your network, model.py catches it automatically
+                            # and falls back to random init (you'll see a printed warning either way).
+  num_classes: 8           # IMD intensity categories, see src/utils.py
+  num_reg_outputs: 1        # wind speed only -- this dataset has no pressure label
+
+train:
+  batch_size: 8
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0005      # slightly higher than the synthetic config -- 108 train images overfits fast
+  loss_weights:
+    cls: 1.0
+    reg: 0.5
+  num_workers: 0
+  checkpoint_dir: checkpoints_real
+  log_path: outputs_real/train_log.csv

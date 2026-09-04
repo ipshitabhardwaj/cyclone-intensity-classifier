@@ -1,0 +1,32 @@
+# Config for the cyclone classification MVP.
+# Swap data.root to point at real CyINSAT/MOSDAC data once available —
+# nothing else needs to change.
+
+data:
+  root: data/cyinsat          # expects details.csv, parameters.csv, images/<cyclone_id>/<channel>/*.png
+  channels: [IR1, IR2, MIR, WV]
+  img_size: 128
+  val_split: 0.2               # fraction of STORMS (not images) held out for validation
+  seed: 42
+
+model:
+  backbone: efficientnet_b0
+  pretrained: true             # set false if no internet access to download ImageNet weights
+  num_classes: 8                # IMD intensity categories, see src/utils.py
+
+train:
+  batch_size: 16
+  epochs: 4
+  lr: 0.0003
+  weight_decay: 0.0001
+  loss_weights:
+    cls: 1.0                   # classification (intensity category)
+    reg: 0.5                   # regression (wind speed + pressure)
+  num_workers: 2
+  checkpoint_dir: checkpoints
+  log_path: outputs/train_log.csv
+
+synthetic:
+  num_storms: 24
+  frames_per_storm_min: 12
+  frames_per_storm_max: 30
