@@ -17,7 +17,9 @@ model:
   backbone: efficientnet_b0
   pretrained: true
   num_classes: 8           # IMD intensity categories, see src/utils.py
-  num_reg_outputs: 1        # wind speed only
+  num_reg_outputs: 2        # wind speed + pressure (mb) -- see src/train_combined.py's
+                            # masked_mse: the 136 Kaggle images have no pressure label and
+                            # are masked out of that output's loss/MAE, not dropped
 
 train:
   batch_size: 16            # bumped from 8 (config_real.yaml) -- 1032 samples vs 136 supports it
@@ -28,5 +30,8 @@ train:
     cls: 1.0
     reg: 0.5
   num_workers: 0
-  checkpoint_dir: checkpoints_combined
-  log_path: outputs_combined/train_log.csv
+  # v2 checkpoint dir/log -- kept separate from the original wind-only
+  # checkpoints_combined/best.pt (40.4% val_acc) until the pressure-head
+  # retrain is honestly confirmed not to regress classification accuracy.
+  checkpoint_dir: checkpoints_combined_v2
+  log_path: outputs_combined_v2/train_log.csv

@@ -31,7 +31,7 @@ class TemporalCycloneNet(nn.Module):
                  gru_hidden: int = 128, num_horizons: int = len(HORIZONS_HOURS)):
         super().__init__()
 
-        base = CycloneNet(in_channels=2, num_classes=8, pretrained=False, num_reg_outputs=1)
+        base = CycloneNet(in_channels=2, num_classes=8, pretrained=False, num_reg_outputs=2)
         if backbone_ckpt and os.path.exists(backbone_ckpt):
             ckpt = torch.load(backbone_ckpt, map_location="cpu", weights_only=False)
             base.load_state_dict(ckpt["model_state"])

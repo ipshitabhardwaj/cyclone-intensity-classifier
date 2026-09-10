@@ -52,7 +52,7 @@ def main():
 
     all_true, all_pred, wind_ae = [], [], []
     with torch.no_grad():
-        for x, y_cls, y_reg, _meta in val_loader:
+        for x, y_cls, y_reg, _y_reg_mask, _meta in val_loader:
             x = x.to(device)
             cls_out, reg_out = model(x)
             pred = cls_out.argmax(dim=1).cpu().numpy()
@@ -60,7 +60,7 @@ def main():
             all_pred.extend(pred.tolist())
 
             pred_wind = denormalize_wind(reg_out.cpu())
-            true_wind = denormalize_wind(y_reg)
+            true_wind = denormalize_wind(y_reg[..., :1])
             wind_ae.extend((pred_wind - true_wind).abs().tolist())
 
     labels_present = sorted(set(all_true) | set(all_pred))
@@ -77,7 +77,7 @@ def main():
     cam = GradCAM(model)
     idxs = np.linspace(0, len(val_ds) - 1, min(args.gradcam_samples, len(val_ds)), dtype=int)
     for i in idxs:
-        x, y_cls, y_reg, meta = val_ds[int(i)]
+        x, y_cls, y_reg, _y_reg_mask, meta = val_ds[int(i)]
         x_in = x.unsqueeze(0).to(device)
         heatmap, pred_idx, probs, reg_pred = cam(x_in)
         base = x[0].numpy()  # IR channel as the visual background

@@ -40,6 +40,13 @@ CSV_NAME = "insat_3d_ds - Sheet.csv"
 # set ranges ~46-237 km/h (25-128 knots); padded a bit on both sides.
 WIND_MIN, WIND_MAX = 40.0, 250.0
 
+# Normalization range for the pressure regression target (mb). Real labeled
+# data (HURSAT-B1 + MOSDAC/Amphan, from IBTrACS/best-track matching) ranges
+# 920-1010 mb; padded a bit on both sides. The 136 Kaggle images have no
+# pressure label at all -- those samples get pressure_mb=None and are masked
+# out of the pressure loss/metric (see y_reg_mask below), not dropped.
+PRESSURE_MIN, PRESSURE_MAX = 900.0, 1015.0
+
 
 def load_samples(root: str):
     """Read the CSV and resolve image paths. Returns a list of dict rows."""
@@ -63,6 +70,7 @@ def load_samples(root: str):
             "knots": knots,
             "kmph": kmph,
             "cat_idx": kmph_to_category(kmph),
+            "pressure_mb": None,  # not labeled in this dataset -- see module docstring
         })
     return samples
 
@@ -129,17 +137,29 @@ class KaggleINSAT3DDataset(Dataset):
         x = torch.from_numpy(np.stack([ir, raw], axis=0))  # (2, H, W)
 
         wind_norm = (s["kmph"] - WIND_MIN) / (WIND_MAX - WIND_MIN)
-        y_reg = torch.tensor([wind_norm], dtype=torch.float32)
+        pressure_mb = s.get("pressure_mb")
+        has_pressure = pressure_mb is not None
+        pressure_norm = (pressure_mb - PRESSURE_MIN) / (PRESSURE_MAX - PRESSURE_MIN) if has_pressure else 0.0
+        y_reg = torch.tensor([wind_norm, pressure_norm], dtype=torch.float32)
+        y_reg_mask = torch.tensor([1.0, 1.0 if has_pressure else 0.0], dtype=torch.float32)
         y_cls = torch.tensor(s["cat_idx"], dtype=torch.long)
 
         meta = {
             "img_name": s["img_name"],
             "knots": s["knots"],
             "kmph": s["kmph"],
+            # float('nan'), not None -- default_collate can't batch a mix of
+            # None and float across samples (Kaggle has no pressure, HURSAT/
+            # MOSDAC do); check has_pressure via y_reg_mask[..., 1], not this.
+            "pressure_mb": pressure_mb if has_pressure else float("nan"),
             "has_raw": s["has_raw"],
         }
-        return x, y_cls, y_reg, meta
+        return x, y_cls, y_reg, y_reg_mask, meta
 
 
 def denormalize_wind(y_reg: torch.Tensor) -> torch.Tensor:
     return y_reg[..., 0] * (WIND_MAX - WIND_MIN) + WIND_MIN
+
+
+def denormalize_pressure(y_reg: torch.Tensor) -> torch.Tensor:
+    return y_reg[..., 1] * (PRESSURE_MAX - PRESSURE_MIN) + PRESSURE_MIN

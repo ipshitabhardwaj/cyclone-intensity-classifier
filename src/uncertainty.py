@@ -113,7 +113,7 @@ if __name__ == "__main__":
     print(f"Running {args.n_samples} MC-Dropout passes on {len(idxs)} random images "
           f"from {args.checkpoint}...\n")
     for i in idxs:
-        x, y_cls, y_reg, meta = ds[i]
+        x, y_cls, y_reg, _y_reg_mask, meta = ds[i]
         result = predict_with_uncertainty(model, x, n_samples=args.n_samples)
         pred_cat = category_label(result["pred_category_idx"])
         true_cat = category_label(int(y_cls))

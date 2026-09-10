@@ -42,7 +42,7 @@ def build_feature_bank(model, dataset, batch_size: int = 16):
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     embeddings, img_names, kmphs, cat_idxs = [], [], [], []
-    for x, y_cls, y_reg, meta in loader:
+    for x, y_cls, y_reg, _y_reg_mask, meta in loader:
         emb = extract_embedding(model, x)
         embeddings.append(emb)
         img_names.extend(meta["img_name"])
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     random.seed()
     idxs = random.sample(range(len(ds)), min(args.n, len(ds)))
     for i in idxs:
-        x, y_cls, y_reg, meta = ds[i]
+        x, y_cls, y_reg, _y_reg_mask, meta = ds[i]
         matches = find_similar(model, x, bank, k=args.k, exclude_name=meta["img_name"])
         print(f"Query: {meta['img_name']} -- true={category_label(int(y_cls))} ({meta['kmph']:.0f}kmph)")
         for m in matches:

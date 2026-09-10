@@ -2,7 +2,7 @@
 
 **SIH26070** · AI/ML-based system for identification, classification, and prediction of tropical cyclone patterns using multi-source satellite data · Ministry of Earth Sciences / IMD · Disaster Management theme
 
-*Last updated: this document reflects the state of the project after adding temporal intensity forecasting (checkpoint `checkpoints_temporal/best.pt`) on top of the classifier (checkpoint `checkpoints_combined/best.pt`, 40.4% validation accuracy).*
+*Last updated: this document reflects the state of the project after (1) wiring the live Forecast tab + Rapid Intensification check into the dashboard and (2) adding a real pressure (mb) regression head alongside wind speed, retrained and promoted as the new production checkpoint (`checkpoints_combined/best.pt`, 41.9% validation accuracy — up slightly from 40.4%, confirming the added output did not cost classification accuracy). The temporal forecaster (`checkpoints_temporal/best.pt`) was retrained on top of this new backbone and re-validated.*
 
 ---
 
@@ -16,31 +16,33 @@
 
 Total: **1,032 real labeled images**, spanning all 8 IMD intensity categories.
 
-**Model:** CycloneNet — an EfficientNet-B0 backbone adapted to take a 2-channel input (IR + a second "raw" channel), with two heads: an 8-way classification head (IMD category) and a wind-speed regression head.
+**Model:** CycloneNet — an EfficientNet-B0 backbone adapted to take a 2-channel input (IR + a second "raw" channel), with two heads: an 8-way classification head (IMD category) and a 2-output regression head (wind speed + **pressure, mb**).
 
 **Training:** `src/train_combined.py` trains on all three sources together. Validation is a **storm-held-out split** — 2 entire HURSAT-B1 storms (Phet, Nilofar) never seen in training at all, not just held-out images. This matters: a random split of 3-hourly frames from the same storm would put near-duplicate images on both sides and inflate the score without proving anything about generalization. Kaggle and Amphan images all go into training (neither has a storm ID to hold out cleanly, and Amphan is the only real Super Cyclonic Storm source, so holding it out would remove the one thing it was added to fix).
 
-**Current best checkpoint:** 40.4% validation accuracy on 2 completely unseen storms — a harder and more honest bar than the original 44.4% baseline, which was measured on a random image split with no storm awareness.
+**Current best checkpoint:** 41.9% validation accuracy on 2 completely unseen storms (up from 40.4% before the pressure head was added — a genuine, honestly-measured improvement, not a regression traded for the new output), plus 27.2 km/h wind MAE and **10.2 mb pressure MAE** on those same held-out storms.
+
+**Pressure regression (new):** 87% of the training pool (896/1,032 images — all of HURSAT-B1 and MOSDAC/Amphan, from real IBTrACS/best-track matching) carries a real, labeled pressure value; only the 136 Kaggle images don't. The 2nd regression output is trained with a **masked MSE loss** — Kaggle samples are simply excluded from the pressure loss/metric (mask=0), not given a fabricated label — so the pressure head is trained and validated on exclusively real data. `src/kaggle_dataset.py`'s `denormalize_pressure()` converts the normalized output back to mb; the dashboard's "Assess a Storm" tab now shows a predicted pressure alongside predicted wind speed, and the real actual pressure when the chosen image has one.
 
 **Explainability & trust features (already built and wired into the dashboard):**
 - **Grad-CAM** (`src/gradcam.py`) — visual heatmap of what the model looked at.
 - **MC-Dropout uncertainty** (`src/uncertainty.py`) — confidence estimate per prediction, flagged when low.
 - **Historical precedent retrieval** (`src/historical_comparison.py`) — embeds every training image once, retrieves the closest real historical matches by cosine similarity, shown as a percentile so it's comparable across checkpoints.
-- **Rapid Intensification alerting** (`src/ri_alert.py`) — real threshold-based RI detection (Kaplan & DeMaria 2003), validated against Amphan's actual best-track record, which shows the exact real-world RI episode the logic correctly flags.
+- **Rapid Intensification alerting** (`src/ri_alert.py`) — real threshold-based RI detection (Kaplan & DeMaria 2003), source-agnostic by design. Validated two ways: against Amphan's actual best-track record (the historical Early-Warning Alert tab), and — new — against the temporal forecaster's own live +6h/+12h/+24h predictions, in the Forecast tab. A genuine true-positive case is confirmed: an anchor on 16 May 2020 06:30 for Amphan where the model's own +24h prediction crosses the +30kt/24h threshold and correctly fires.
 
-**Dashboard** (`app.py`, Streamlit): 4 tabs — Assess a Storm, Historical Precedent, Early-Warning Alert, About & Data. Custom dark theme, a one-line problem statement up top, a compact operational-style alert banner, and an honest "Known limitations" section. Every number on it (accuracy, dataset size, category counts, training curve) is read live from the checkpoint and manifests — nothing is hardcoded. (Not yet wired to the new temporal forecaster below — see section 4.)
+**Dashboard** (`app.py`, Streamlit): **5 tabs** — Assess a Storm, Historical Precedent, Early-Warning Alert, **Forecast**, About & Data. Custom dark theme, a one-line problem statement up top, a compact operational-style alert banner, and an honest "Known limitations" section. Every number on it (accuracy, dataset size, category counts, training curve, forecaster MAE) is read live from the checkpoints and manifests — nothing is hardcoded. The Forecast tab lets a judge pick any storm and time point and see the model's own +6h/+12h/+24h forecast plotted against the real historical outcome, with a clear "held out — never trained on" vs. "used in training" distinction, plus the live RI check described above.
 
 **Temporal intensity FORECASTING — the "…and prediction" part of the problem statement (new):** `src/temporal_dataset.py`, `src/temporal_model.py`, `src/train_temporal.py`. Until now, CycloneNet only classified the *current* frame; this is a genuine forecaster: given the last 4 observed frames of a storm, it predicts wind speed at **+6h / +12h / +24h ahead**.
 
 - **Data:** only NOAA HURSAT-B1 (10 storms, ~3-hourly) and MOSDAC/Amphan (1 storm, ~30-minute) have the real timestamps + storm identity a sequence needs — the 136-image Kaggle set has neither, so it's classifier-only. Pooling the two gives **831 real sequences across 11 storms**, built directly from each manifest's `datetime_utc` column with a per-storm adaptive time-tolerance (so 3-hourly and 30-minute cadences share one pipeline without either starving the other of valid horizon labels).
-- **Architecture:** the frame-level CycloneNet backbone (already trained, `checkpoints_combined/best.pt`) is reused **frozen** as a per-frame feature extractor — there isn't remotely enough sequence data (11 storms) to also learn image features from scratch. A small GRU (550K trainable params vs. 4.5M total) runs over the 4-frame embedding sequence, and the head predicts a **delta** (km/h change from the current, last-observed wind speed) rather than an absolute value, with the current wind speed fed in explicitly. This mattered in practice: a first version predicting absolute wind speed from images alone actually lost to a trivial "predict no change" baseline at +6h/+12h, because it had no explicit reference point for "how strong is this storm right now." Reframing as a delta fixed that.
+- **Architecture:** the frame-level CycloneNet backbone (already trained, `checkpoints_combined/best.pt` — now the pressure-head-equipped v2 backbone; the forecaster was retrained from scratch on top of it after the backbone changed, since its GRU had learned to read the old backbone's specific feature space) is reused **frozen** as a per-frame feature extractor — there isn't remotely enough sequence data (11 storms) to also learn image features from scratch. A small GRU (550K trainable params vs. 4.5M total) runs over the 4-frame embedding sequence, and the head predicts a **delta** (km/h change from the current, last-observed wind speed) rather than an absolute value, with the current wind speed fed in explicitly. This mattered in practice: a first version predicting absolute wind speed from images alone actually lost to a trivial "predict no change" baseline at +6h/+12h, because it had no explicit reference point for "how strong is this storm right now." Reframing as a delta fixed that.
 - **Validation: the same storm-held-out split as the classifier** (PHET, NILOFAR — 126 held-out sequences, 2 storms never seen in training). Every number below is measured against a **persistence baseline** (predict "no change from right now"), the honest bar for any forecasting claim:
 
   | Horizon | Persistence baseline (MAE) | CycloneNet forecaster (MAE) | Improvement |
   |---|---|---|---|
-  | +6h  | 9.63 km/h  | 8.69 km/h  | ~10% |
-  | +12h | 19.26 km/h | 14.68 km/h | ~24% |
-  | +24h | 38.48 km/h | 28.62 km/h | ~26% |
+  | +6h  | 9.63 km/h  | 9.05 km/h  | ~6% |
+  | +12h | 19.26 km/h | 16.79 km/h | ~13% |
+  | +24h | 38.48 km/h | 30.59 km/h | ~20% |
 
   The model beats the baseline at every horizon, and the margin *grows* with horizon — exactly what a real forecasting skill signal should look like (persistence degrades fast over time; a model that's actually reading trend information from the image sequence degrades more slowly). This is a modest but genuine and honestly-validated result, not an aspirational one.
 
@@ -71,7 +73,7 @@ Total: **1,032 real labeled images**, spanning all 8 IMD intensity categories.
 
 ## 3. How it is implemented
 
-Each data source has its own preprocessing script (`src/kaggle_dataset.py`, `src/hursat_dataset.py`, `src/mosdac_dataset.py`), but all three are normalized into the **same sample format** — `img_name`, `storm`, `ir_path`, `raw_path`, `has_raw`, `knots`, `kmph`, `cat_idx` — so `train_combined.py` can just concatenate the three sample lists with zero per-source special-casing.
+Each data source has its own preprocessing script (`src/kaggle_dataset.py`, `src/hursat_dataset.py`, `src/mosdac_dataset.py`), but all three are normalized into the **same sample format** — `img_name`, `storm`, `ir_path`, `raw_path`, `has_raw`, `knots`, `kmph`, `cat_idx`, `pressure_mb` (real value for HURSAT/MOSDAC, `None` for Kaggle) — so `train_combined.py` can just concatenate the three sample lists with zero per-source special-casing. The dataset's `__getitem__` pairs `pressure_mb` with a `y_reg_mask` tensor so the 136 Kaggle samples (no pressure label) are masked out of the pressure loss/metric rather than given a fabricated value — see `masked_mse()` in `src/train_combined.py`.
 
 Key implementation details worth knowing:
 
@@ -85,13 +87,10 @@ Key implementation details worth knowing:
 
 ## 4. What is yet to be done / left to do
 
-- **Accuracy is still modest (40.4%).** Levers not yet pulled: a real ImageNet-pretrained backbone (blocked in this sandbox because `download.pytorch.org` isn't reachable here — worth simply retrying training on a machine with normal internet access, since the model currently trains from random initialization, which costs real accuracy), more epochs / hyperparameter tuning, and addressing the remaining class imbalance (Low Pressure Area is still rare).
-- **Pressure regression is unused.** The model has a 1-output (wind-only) regression head. Amphan's real best track *does* include pressure — wiring up a 2-output head (wind + pressure) for the sources that have both would be a real, usable improvement, not just a nice-to-have.
-- **RI alert still isn't connected to the temporal model's own predictions.** It's validated against real historical best-track wind sequences (Amphan), and separately the temporal forecaster now predicts wind speed forward in time — but nothing yet feeds the forecaster's own +6h/+12h/+24h predictions into the RI-detection logic. This is now the natural next step (enhancement #1 below is DONE; this is the follow-on, previously enhancement #4).
-- **Temporal forecaster isn't wired into the dashboard yet.** `src/train_temporal.py` / `checkpoints_temporal/best.pt` exist and are validated, but `app.py` has no tab that runs a live forecast — a judge can't see it in the demo yet, only in the training log.
+- **Accuracy is still modest (41.9%).** Levers not yet pulled: a real ImageNet-pretrained backbone (blocked in this sandbox because `download.pytorch.org` isn't reachable here — worth re-testing on a machine with normal internet access, since the model currently trains from random initialization, which costs real accuracy), more epochs / hyperparameter tuning, and addressing the remaining class imbalance (Low Pressure Area is still rare — only 4 training examples).
 - **Temporal forecaster's val set is small (126 sequences, 2 storms)** — the storm-held-out MAE numbers are real and honestly measured, but with only 11 storms total to draw from, a couple more held-out storms' worth of data would make the comparison to the persistence baseline more statistically solid.
-- **Accuracy on the frame classifier is still modest (40.4%).** Levers not yet pulled: a real ImageNet-pretrained backbone (blocked in this sandbox because `download.pytorch.org` isn't reachable here — worth simply retrying training on a machine with normal internet access, since the model currently trains from random initialization, which costs real accuracy), more epochs / hyperparameter tuning, and addressing the remaining class imbalance (Low Pressure Area is still rare).
-- **Pressure regression is unused.** The model has a 1-output (wind-only) regression head. Amphan's real best track *does* include pressure — wiring up a 2-output head (wind + pressure) for the sources that have both would be a real, usable improvement, not just a nice-to-have.
+- **MC-Dropout confidence isn't calibration-checked.** The dashboard reports a confidence % per prediction, but nobody has verified whether "80% confidence" predictions are actually right ~80% of the time on held-out data — a reliability plot would make this credible rather than just plausible.
+- **No lightweight deployment path yet.** Still a Streamlit dashboard + local checkpoints, not an ONNX export or small API — "prototype," not yet "pilot-ready."
 - **PPT housekeeping** (not code): fill in Team ID on the title slide before uploading.
 
 ---
@@ -101,14 +100,15 @@ Key implementation details worth knowing:
 Roughly in order of how much they'd differentiate the submission:
 
 1. ~~**Actual intensity forecasting (temporal model).**~~ **DONE** — see section 1 above (`src/train_temporal.py`). A GRU over frozen CycloneNet frame embeddings predicts +6h/+12h/+24h wind speed, beating a persistence baseline at every horizon on 2 fully held-out storms.
-2. **Wire the temporal forecaster into the dashboard** — a 5th tab that runs the last 4 frames of a chosen storm through `checkpoints_temporal/best.pt` and shows the +6h/+12h/+24h forecast live, not just in a training log. Now that the model exists and validates well, this is the highest-leverage next step for the actual demo.
-3. **Connect RI detection to the temporal forecaster's own predictions** rather than only historical best-track data — feed the model's own +6h/+12h/+24h sequence into the existing `src/ri_alert.py` threshold logic.
-4. **Storm track / motion prediction** alongside intensity — where the storm is headed, not just how strong it is.
-5. **Wire the pressure head** using Amphan's real pressure labels (small effort, real payoff).
-6. **Broader basin coverage** — pretrain on a larger multi-basin HURSAT-B1 or TC PRIMED sample, then fine-tune on North Indian Ocean data, to give the backbone more to learn from before specializing.
-7. **Confidence calibration check** — does the MC-Dropout confidence number actually track real accuracy (e.g., are "80% confidence" predictions right ~80% of the time)? A reliability plot would make the uncertainty feature more credible to judges who ask about it.
-8. **A lightweight deployment path** — package the model as an ONNX export or a small API, so "prototype" can credibly become "pilot-ready" in the pitch.
-8. **Live/near-real-time ingestion** — instead of static downloaded archives, a scheduled pull from MOSDAC's open feed would support the "operational" framing directly.
+2. ~~**Wire the temporal forecaster into the dashboard.**~~ **DONE** — the Forecast tab runs the last 4 frames of a chosen storm through `checkpoints_temporal/best.pt` live.
+3. ~~**Connect RI detection to the temporal forecaster's own predictions.**~~ **DONE** — the Forecast tab's "Rapid Intensification check" feeds the model's own live +6h/+12h/+24h sequence into the existing `src/ri_alert.py` threshold logic; a genuine true-positive case is confirmed (Amphan, 16 May 06:30 anchor).
+4. ~~**Wire the pressure head.**~~ **DONE** — see section 1 above. A real, masked-loss 2nd regression output (wind + pressure), retrained and promoted with no classification-accuracy regression (41.9% vs. 40.4%).
+5. **Address class imbalance / accuracy.** Re-test `download.pytorch.org` reachability for a real ImageNet-pretrained backbone, and class-weight the loss to address Low Pressure Area's 4-example training set.
+6. **Confidence calibration check** — does the MC-Dropout confidence number actually track real accuracy (e.g., are "80% confidence" predictions right ~80% of the time)? A reliability plot would make the uncertainty feature more credible to judges who ask about it.
+7. **A lightweight deployment path** — package the model as an ONNX export or a small API, so "prototype" can credibly become "pilot-ready" in the pitch.
+8. **Storm track / motion prediction** alongside intensity — where the storm is headed, not just how strong it is.
+9. **Broader basin coverage** — pretrain on a larger multi-basin HURSAT-B1 or TC PRIMED sample, then fine-tune on North Indian Ocean data, to give the backbone more to learn from before specializing.
+10. **Live/near-real-time ingestion** — instead of static downloaded archives, a scheduled pull from MOSDAC's open feed would support the "operational" framing directly.
 
 ---
 

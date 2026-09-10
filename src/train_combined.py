@@ -37,7 +37,10 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(__file__))
-from kaggle_dataset import KaggleINSAT3DDataset, load_samples as load_kaggle_samples, denormalize_wind
+from kaggle_dataset import (
+    KaggleINSAT3DDataset, load_samples as load_kaggle_samples,
+    denormalize_wind, denormalize_pressure,
+)
 from hursat_dataset import load_hursat_samples
 from mosdac_dataset import load_mosdac_samples
 from model import CycloneNet
@@ -49,21 +52,31 @@ from utils import load_config, set_seed, category_label
 VAL_STORMS = {"PHET", "NILOFAR"}
 
 
+def masked_mse(reg_out, y_reg, y_reg_mask):
+    """Mean squared error over both regression outputs (wind, pressure),
+    masked per-sample per-output -- the 136 Kaggle images have no pressure
+    label (mask=0 in that column) and must not contribute to the pressure
+    loss, but still contribute their (masked=1) wind loss normally."""
+    err = (reg_out - y_reg) ** 2 * y_reg_mask
+    return err.sum() / y_reg_mask.sum().clamp(min=1.0)
+
+
 def run_epoch(model, loader, optimizer, device, loss_w, train: bool):
     model.train(mode=train)
     ce = torch.nn.CrossEntropyLoss()
-    mse = torch.nn.MSELoss()
 
     total_loss, total_cls_correct, total_n = 0.0, 0, 0
-    total_wind_ae = 0.0
+    total_wind_ae, total_wind_n = 0.0, 0
+    total_pres_ae, total_pres_n = 0.0, 0
 
-    for x, y_cls, y_reg, _meta in loader:
-        x, y_cls, y_reg = x.to(device), y_cls.to(device), y_reg.to(device)
+    for x, y_cls, y_reg, y_reg_mask, _meta in loader:
+        x, y_cls = x.to(device), y_cls.to(device)
+        y_reg, y_reg_mask = y_reg.to(device), y_reg_mask.to(device)
 
         with torch.set_grad_enabled(train):
             cls_out, reg_out = model(x)
             loss_cls = ce(cls_out, y_cls)
-            loss_reg = mse(reg_out, y_reg)
+            loss_reg = masked_mse(reg_out, y_reg, y_reg_mask)
             loss = loss_w["cls"] * loss_cls + loss_w["reg"] * loss_reg
 
             if train:
@@ -76,14 +89,25 @@ def run_epoch(model, loader, optimizer, device, loss_w, train: bool):
         total_cls_correct += (cls_out.argmax(dim=1) == y_cls).sum().item()
         total_n += bs
 
-        pred_wind = denormalize_wind(reg_out.detach().cpu())
-        true_wind = denormalize_wind(y_reg.detach().cpu())
-        total_wind_ae += (pred_wind - true_wind).abs().sum().item()
+        reg_out_cpu, y_reg_cpu, mask_cpu = reg_out.detach().cpu(), y_reg.detach().cpu(), y_reg_mask.detach().cpu()
+        pred_wind = denormalize_wind(reg_out_cpu)
+        true_wind = denormalize_wind(y_reg_cpu)
+        wind_mask = mask_cpu[..., 0]
+        total_wind_ae += ((pred_wind - true_wind).abs() * wind_mask).sum().item()
+        total_wind_n += wind_mask.sum().item()
+
+        pred_pres = denormalize_pressure(reg_out_cpu)
+        true_pres = denormalize_pressure(y_reg_cpu)
+        pres_mask = mask_cpu[..., 1]
+        total_pres_ae += ((pred_pres - true_pres).abs() * pres_mask).sum().item()
+        total_pres_n += pres_mask.sum().item()
 
     return {
         "loss": total_loss / total_n,
         "acc": total_cls_correct / total_n,
-        "wind_mae_kmph": total_wind_ae / total_n,
+        "wind_mae_kmph": total_wind_ae / max(total_wind_n, 1),
+        "pressure_mae_mb": total_pres_ae / max(total_pres_n, 1),
+        "pressure_n": total_pres_n,
     }
 
 
@@ -154,6 +178,7 @@ def main():
               f"train_loss={train_metrics['loss']:.4f} train_acc={train_metrics['acc']:.3f} | "
               f"val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['acc']:.3f} "
               f"val_wind_mae={val_metrics['wind_mae_kmph']:.1f}kmph "
+              f"val_pressure_mae={val_metrics['pressure_mae_mb']:.1f}mb (n={val_metrics['pressure_n']:.0f}) "
               f"({dt:.1f}s)")
 
         row = {"epoch": epoch}
@@ -169,6 +194,8 @@ def main():
                 "config": cfg,
                 "epoch": epoch,
                 "val_acc": best_val_acc,
+                "val_wind_mae_kmph": val_metrics["wind_mae_kmph"],
+                "val_pressure_mae_mb": val_metrics["pressure_mae_mb"],
             }, ckpt_path)
             print(f"  -> new best (val_acc={best_val_acc:.3f}), saved to {ckpt_path}")
 

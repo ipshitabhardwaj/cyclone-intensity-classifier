@@ -28,8 +28,9 @@ def run_epoch(model, loader, optimizer, device, loss_w, train: bool):
     total_loss, total_cls_correct, total_n = 0.0, 0, 0
     total_wind_ae = 0.0
 
-    for x, y_cls, y_reg, _meta in loader:
+    for x, y_cls, y_reg, _y_reg_mask, _meta in loader:
         x, y_cls, y_reg = x.to(device), y_cls.to(device), y_reg.to(device)
+        y_reg = y_reg[..., :1]  # this dataset (Kaggle-only) has no pressure label; wind only
 
         with torch.set_grad_enabled(train):
             cls_out, reg_out = model(x)

@@ -29,14 +29,17 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-from kaggle_dataset import load_samples as load_kaggle_samples, denormalize_wind
+from kaggle_dataset import (
+    load_samples as load_kaggle_samples, denormalize_wind, denormalize_pressure,
+    PRESSURE_MIN, PRESSURE_MAX,
+)
 from hursat_dataset import load_hursat_samples
 from mosdac_dataset import load_mosdac_samples
 from model import CycloneNet
 from gradcam import GradCAM, overlay_heatmap
 from uncertainty import predict_with_uncertainty
 from historical_comparison import build_feature_bank, find_similar
-from ri_alert import load_series, find_ri_events, merge_overlapping
+from ri_alert import load_series, find_ri_events, merge_overlapping, RI_THRESHOLD_KT, RI_WINDOW_HOURS
 from utils import load_config, category_label, IMD_CATEGORIES, wind_speed_to_category
 from temporal_dataset import (
     load_storm_timelines, build_sequences, VAL_STORMS, HORIZONS_HOURS,
@@ -363,7 +366,7 @@ def load_gray(path):
 with tab_classify:
     mode = st.radio("Choose an image to classify", ["Pick from dataset", "Upload your own"], horizontal=True)
 
-    true_kmph, true_cat, query_name = None, None, None
+    true_kmph, true_cat, true_pressure, query_name = None, None, None, None
     if mode == "Pick from dataset":
         names = [s["img_name"] for s in samples]
         choice = st.selectbox("Image", names)
@@ -371,6 +374,7 @@ with tab_classify:
         ir_arr = load_gray(s["ir_path"])
         raw_arr = load_gray(s["raw_path"])
         true_kmph, true_cat, query_name = s["kmph"], s["cat_idx"], s["img_name"]
+        true_pressure = s.get("pressure_mb")  # None for the 136 Kaggle images -- no label
         ir_display, raw_display = Image.open(s["ir_path"]), Image.open(s["raw_path"])
         if not s["has_raw"]:
             st.caption("Note: this image had no matched raw counterpart -- IR image reused for both channels.")
@@ -398,12 +402,18 @@ with tab_classify:
     cam = GradCAM(model)
     heatmap, pred_idx, probs, reg_pred = cam(x)
     cam.remove()
-    pred_kmph = float(denormalize_wind(torch.tensor(reg_pred)))
+    reg_pred_t = torch.tensor(reg_pred)
+    pred_kmph = float(denormalize_wind(reg_pred_t))
+    pred_pressure = float(denormalize_pressure(reg_pred_t)) if reg_pred_t.shape[-1] > 1 else None
     overlay = overlay_heatmap(ir_arr, heatmap)
 
     unc = predict_with_uncertainty(model, x, n_samples=30)
     conf = unc["cls_probs_mean"][pred_idx].item()
     wind_std_kmph = float(unc["reg_std"][0]) * (250.0 - 40.0)
+    pressure_std_mb = (
+        float(unc["reg_std"][1]) * (PRESSURE_MAX - PRESSURE_MIN)
+        if pred_pressure is not None and len(unc["reg_std"]) > 1 else None
+    )
 
     col1, col2, col3 = st.columns(3)
     col1.image(ir_display, caption="IR channel (input)", width='stretch')
@@ -412,12 +422,19 @@ with tab_classify:
 
     st.subheader("Prediction")
     alert_banner(pred_idx, conf)
-    mcols = st.columns(4) if true_cat is not None else st.columns(2)
-    mcols[0].metric("Predicted category", category_label(pred_idx))
-    mcols[1].metric("Predicted wind speed", f"{pred_kmph:.0f} km/h", f"±{wind_std_kmph:.0f} km/h")
+    n_metrics = 2 + (1 if pred_pressure is not None else 0) + (2 if true_cat is not None else 0)
+    mcols = st.columns(n_metrics)
+    i = 0
+    mcols[i].metric("Predicted category", category_label(pred_idx)); i += 1
+    mcols[i].metric("Predicted wind speed", f"{pred_kmph:.0f} km/h", f"±{wind_std_kmph:.0f} km/h"); i += 1
+    if pred_pressure is not None:
+        delta = f"±{pressure_std_mb:.0f} mb" if pressure_std_mb is not None else None
+        mcols[i].metric("Predicted pressure", f"{pred_pressure:.0f} mb", delta); i += 1
     if true_cat is not None:
-        mcols[2].metric("Actual category", category_label(true_cat))
-        mcols[3].metric("Actual wind speed", f"{true_kmph:.0f} km/h")
+        mcols[i].metric("Actual category", category_label(true_cat)); i += 1
+        mcols[i].metric("Actual wind speed", f"{true_kmph:.0f} km/h"); i += 1
+    if true_pressure is not None:
+        st.caption(f"Actual pressure (real IBTrACS/best-track label): {true_pressure:.0f} mb")
 
     st.subheader("Category probabilities")
     cat_names = [c[1] for c in IMD_CATEGORIES]
@@ -473,8 +490,9 @@ with tab_ri:
         "2020 record, since we have the documented outcome to check it against."
     )
     st.caption(
-        "No model involved -- validating the alert *logic* against real history. It will run on "
-        "model-predicted wind sequences once MOSDAC's time-series imagery lands."
+        "No model involved here -- validating the alert *logic* against real, documented "
+        "history. The same logic also runs on the temporal model's own live predictions -- "
+        "see the Rapid Intensification check in the Forecast tab."
     )
     times, winds, episodes = load_ri_case_study()
     fig_ri = go.Figure()
@@ -606,6 +624,42 @@ with tab_forecast:
                               xaxis=dict(title="Date (UTC)"), height=420,
                               legend=dict(orientation="h", yanchor="bottom", y=1.02))
         st.plotly_chart(fig_fc, width='stretch')
+
+        # --- Live RI check, on THIS forecast's own predicted trajectory ---
+        # Same find_ri_events/merge_overlapping logic as the Early-Warning tab,
+        # but fed the model's own +6h/+12h/+24h predictions instead of a
+        # historical best-track record -- the alert logic never changes
+        # between "checking history" and "live forecasting", only the source
+        # of the wind-speed series does (see src/ri_alert.py's docstring).
+        rt_times = [seq["anchor_dt"]] + [seq["anchor_dt"] + pd.Timedelta(hours=h) for h in HORIZONS_HOURS]
+        rt_winds_kt = [w / 1.852 for w in fc_winds]  # km/h -> kt
+        rt_events = find_ri_events(rt_times, rt_winds_kt)
+        rt_episodes = merge_overlapping(rt_events)
+
+        st.markdown("**Rapid Intensification check — from this forecast**")
+        if rt_episodes:
+            start, end, w0, w1, delta = rt_episodes[0]
+            hours = (end - start).total_seconds() / 3600.0
+            st.markdown(
+                f"<div class='alert-banner' style='background:#2a1414; border-color:{STATUS_CRITICAL};'>"
+                f"<span style='font-size:1.2rem;'>🚨</span>&nbsp;&nbsp;"
+                f"<span style='color:{STATUS_CRITICAL}; font-weight:700;'>RAPID INTENSIFICATION ALERT</span>"
+                f"<span style='color:#8b93a1;'> &middot; this model's own forecast predicts "
+                f"+{delta:.0f}kt over {hours:.0f}h, crossing the +{RI_THRESHOLD_KT:.0f}kt/"
+                f"{RI_WINDOW_HOURS:.0f}h threshold (Kaplan &amp; DeMaria, 2003)</span></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            callout(
+                f"No Rapid Intensification threshold crossing predicted in this forecast window "
+                f"(+{RI_THRESHOLD_KT:.0f}kt/{RI_WINDOW_HOURS:.0f}h not reached).",
+                kind="info",
+            )
+        st.caption(
+            "Unlike the Early-Warning Alert tab (validated against Amphan's real historical "
+            "record), this check runs on the temporal model's own live predictions for the "
+            "storm and anchor point chosen above."
+        )
 
         val_mae = tckpt.get("val_mae_per_h", [])
         base_mae = tckpt.get("baseline_mae_per_h", [])

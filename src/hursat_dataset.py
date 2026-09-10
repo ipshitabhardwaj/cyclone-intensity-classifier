@@ -301,6 +301,7 @@ def load_hursat_samples(out_dir):
                 "knots": float(row["wind_kt"]),
                 "kmph": float(row["wind_kmph"]),
                 "cat_idx": int(row["cat_idx"]),
+                "pressure_mb": float(row["pressure_mb"]) if row.get("pressure_mb") else None,
             })
     return samples
 
