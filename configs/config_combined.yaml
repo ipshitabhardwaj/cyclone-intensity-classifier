@@ -30,8 +30,5 @@ train:
     cls: 1.0
     reg: 0.5
   num_workers: 0
-  # v2 checkpoint dir/log -- kept separate from the original wind-only
-  # checkpoints_combined/best.pt (40.4% val_acc) until the pressure-head
-  # retrain is honestly confirmed not to regress classification accuracy.
-  checkpoint_dir: checkpoints_combined_v2
-  log_path: outputs_combined_v2/train_log.csv
+  checkpoint_dir: checkpoints_combined
+  log_path: outputs_combined/train_log.csv

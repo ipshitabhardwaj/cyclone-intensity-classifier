@@ -61,9 +61,25 @@ def masked_mse(reg_out, y_reg, y_reg_mask):
     return err.sum() / y_reg_mask.sum().clamp(min=1.0)
 
 
-def run_epoch(model, loader, optimizer, device, loss_w, train: bool):
+def compute_class_weights(subset, num_classes, device):
+    """Inverse-frequency class weights for CrossEntropyLoss, to address the
+    real imbalance in this data pool (Low Pressure Area has only 4 training
+    examples vs. 212 for Depression -- a 53x gap). Standard sklearn-style
+    'balanced' formula: weight_c = n_samples / (n_classes * count_c), so a
+    class with the average count gets weight ~1 and rarer classes get
+    upweighted proportionally. Classes absent from training (count=0) get
+    weight 0 -- there's nothing to upweight if there's no data at all."""
+    counts = [0] * num_classes
+    for s in subset:
+        counts[s["cat_idx"]] += 1
+    n = len(subset)
+    weights = [n / (num_classes * c) if c > 0 else 0.0 for c in counts]
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
+def run_epoch(model, loader, optimizer, device, loss_w, train: bool, class_weights=None):
     model.train(mode=train)
-    ce = torch.nn.CrossEntropyLoss()
+    ce = torch.nn.CrossEntropyLoss(weight=class_weights)
 
     total_loss, total_cls_correct, total_n = 0.0, 0, 0
     total_wind_ae, total_wind_n = 0.0, 0
@@ -149,6 +165,10 @@ def main():
     print(f"[train_combined] train class counts: {class_counts(train_s)}")
     print(f"[train_combined] val class counts:   {class_counts(val_s)}")
 
+    class_weights = compute_class_weights(train_s, cfg["model"]["num_classes"], device)
+    print(f"[train_combined] class weights (balanced, by train frequency): "
+          f"{ {category_label(i): round(w, 2) for i, w in enumerate(class_weights.tolist())} }")
+
     train_ds = KaggleINSAT3DDataset(train_s, img_size, train=True)
     val_ds = KaggleINSAT3DDataset(val_s, img_size, train=False)
 
@@ -170,8 +190,10 @@ def main():
     log_rows = []
     for epoch in range(1, tcfg["epochs"] + 1):
         t0 = time.time()
-        train_metrics = run_epoch(model, train_loader, optimizer, device, tcfg["loss_weights"], train=True)
-        val_metrics = run_epoch(model, val_loader, optimizer, device, tcfg["loss_weights"], train=False)
+        train_metrics = run_epoch(model, train_loader, optimizer, device, tcfg["loss_weights"],
+                                   train=True, class_weights=class_weights)
+        val_metrics = run_epoch(model, val_loader, optimizer, device, tcfg["loss_weights"],
+                                 train=False, class_weights=class_weights)
         dt = time.time() - t0
 
         print(f"[epoch {epoch:02d}/{tcfg['epochs']}] "
@@ -204,6 +226,24 @@ def main():
         writer.writeheader()
         writer.writerows(log_rows)
     print(f"[train_combined] done. best val_acc={best_val_acc:.3f}. log -> {tcfg['log_path']}")
+
+    # Per-class report on the BEST checkpoint, not just the last epoch --
+    # aggregate accuracy can hide whether class weighting actually helped
+    # (or hurt) the specific rare classes it was meant to fix.
+    from sklearn.metrics import classification_report
+    best_ckpt = torch.load(os.path.join(tcfg["checkpoint_dir"], "best.pt"), map_location=device, weights_only=False)
+    model.load_state_dict(best_ckpt["model_state"])
+    model.eval()
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for x, y_cls, _y_reg, _y_reg_mask, _meta in val_loader:
+            cls_out, _ = model(x.to(device))
+            y_true.extend(y_cls.tolist())
+            y_pred.extend(cls_out.argmax(dim=1).cpu().tolist())
+    present = sorted(set(y_true) | set(y_pred))
+    print(f"\n[train_combined] Per-class report on best checkpoint (held-out storms):")
+    print(classification_report(y_true, y_pred, labels=present,
+                                 target_names=[category_label(i) for i in present], zero_division=0))
 
 
 if __name__ == "__main__":
