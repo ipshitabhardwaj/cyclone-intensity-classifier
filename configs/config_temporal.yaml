@@ -1,0 +1,26 @@
+# Config for the temporal forecasting head (src/train_temporal.py):
+# predicts wind speed at +6h/+12h/+24h from the last 4 observed frames of a
+# storm. Only HURSAT-B1 + MOSDAC/Amphan have real timestamps + storm ids to
+# build sequences from (the 136-image Kaggle set does not -- see
+# src/temporal_dataset.py). Validation is the same storm-held-out split
+# (PHET, NILOFAR) used by the classifier in configs/config_combined.yaml.
+
+data:
+  hursat_root: data/hursat_processed
+  mosdac_root: data/mosdac_processed
+  img_size: 128
+  seed: 42
+
+model:
+  backbone_ckpt: checkpoints_combined/best.pt   # frozen, already-trained CycloneNet
+  freeze_backbone: true
+  gru_hidden: 128
+
+train:
+  batch_size: 16
+  epochs: 40
+  lr: 0.001
+  weight_decay: 0.0001
+  num_workers: 0
+  checkpoint_dir: checkpoints_temporal
+  log_path: outputs_temporal/train_log.csv
