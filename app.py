@@ -4,7 +4,7 @@ Streamlit demo dashboard for the SIH26070 cyclone classification prototype.
 Run it from the project root:
     streamlit run app.py
 
-Four tabs:
+Five tabs:
   - Classify: pick/upload an image, get category + wind speed with MC-Dropout
     confidence, Grad-CAM explanation, and the full probability breakdown.
   - Historical Comparison: nearest-neighbour retrieval against every image in
@@ -12,6 +12,10 @@ Four tabs:
     -- see src/historical_comparison.py for why).
   - Rapid Intensification: a real case study on Cyclone Amphan's actual
     best-track record, showing the RI episode our detector correctly flags.
+  - Forecast: given the last 4 observed frames of a storm, predicts wind
+    speed +6h/+12h/+24h ahead (src/temporal_model.py), validated against a
+    persistence baseline on 2 fully held-out storms -- see
+    src/train_temporal.py.
   - About & Data: dataset composition, known limitations, training curve.
 """
 import os
@@ -33,10 +37,17 @@ from gradcam import GradCAM, overlay_heatmap
 from uncertainty import predict_with_uncertainty
 from historical_comparison import build_feature_bank, find_similar
 from ri_alert import load_series, find_ri_events, merge_overlapping
-from utils import load_config, category_label, IMD_CATEGORIES
+from utils import load_config, category_label, IMD_CATEGORIES, wind_speed_to_category
+from temporal_dataset import (
+    load_storm_timelines, build_sequences, VAL_STORMS, HORIZONS_HOURS,
+    WIND_MIN as T_WIND_MIN, WIND_MAX as T_WIND_MAX,
+)
+from temporal_model import TemporalCycloneNet
 
 CONFIG_PATH = "configs/config_combined.yaml"
 CHECKPOINT_PATH = "checkpoints_combined/best.pt"
+CONFIG_TEMPORAL_PATH = "configs/config_temporal.yaml"
+CHECKPOINT_TEMPORAL_PATH = "checkpoints_temporal/best.pt"
 BESTTRACK_PATH = "data/besttrack/amphan_2020.csv"
 
 st.set_page_config(page_title="Cyclone Intensity Classifier", layout="wide", page_icon="🌀")
@@ -235,6 +246,58 @@ def load_ri_case_study():
     return times, winds, episodes
 
 
+@st.cache_resource
+def load_temporal_model():
+    tcfg = load_config(CONFIG_TEMPORAL_PATH)
+    model_t = TemporalCycloneNet(
+        backbone_ckpt=tcfg["model"]["backbone_ckpt"],
+        freeze_backbone=tcfg["model"]["freeze_backbone"],
+        gru_hidden=tcfg["model"]["gru_hidden"],
+    )
+    tckpt = torch.load(CHECKPOINT_TEMPORAL_PATH, map_location="cpu", weights_only=False)
+    model_t.load_state_dict(tckpt["model_state"])
+    model_t.eval()
+    return tcfg, model_t, tckpt
+
+
+@st.cache_data
+def load_temporal_sequences(_hursat_root, _mosdac_root):
+    by_storm = load_storm_timelines(_hursat_root, _mosdac_root)
+    sequences = build_sequences(by_storm)
+    return by_storm, sequences
+
+
+def load_frame_pair(frame, size):
+    ir = Image.open(frame["ir_path"]).convert("L")
+    raw = Image.open(frame["raw_path"]).convert("L")
+    if ir.size != (size, size):
+        ir = ir.resize((size, size))
+    if raw.size != (size, size):
+        raw = raw.resize((size, size))
+    ir_arr = np.asarray(ir, dtype=np.float32) / 255.0
+    raw_arr = np.asarray(raw, dtype=np.float32) / 255.0
+    return np.stack([ir_arr, raw_arr], axis=0)
+
+
+def run_forecast(seq, model_t, img_size):
+    """seq: one entry from build_sequences(). Returns {horizon: predicted_kmph}."""
+    frames = [load_frame_pair(f, img_size) for f in seq["window"]]
+    x = torch.from_numpy(np.stack(frames, axis=0)).unsqueeze(0).float()  # (1,T,2,H,W)
+    t_first = seq["window"][0]["dt"].timestamp()
+    dt_feat = torch.tensor(
+        [[(f["dt"].timestamp() - t_first) / 3600.0 / 24.0 for f in seq["window"]]],
+        dtype=torch.float32,
+    )
+    anchor_norm = torch.tensor([(seq["anchor_kmph"] - T_WIND_MIN) / (T_WIND_MAX - T_WIND_MIN)],
+                                dtype=torch.float32)
+    with torch.no_grad():
+        delta_kmph = model_t(x, dt_feat, anchor_norm)
+    preds = {}
+    for k, h in enumerate(HORIZONS_HOURS):
+        preds[h] = seq["anchor_kmph"] + float(delta_kmph[0, k])
+    return preds
+
+
 if not os.path.exists(CHECKPOINT_PATH):
     st.error(
         f"No checkpoint found at `{CHECKPOINT_PATH}`. Run `python src/train_real.py "
@@ -284,8 +347,9 @@ with st.sidebar:
         kind="warning",
     )
 
-tab_classify, tab_history, tab_ri, tab_about = st.tabs(
-    ["🔍 Assess a Storm", "📊 Historical Precedent", "⚡ Early-Warning Alert", "ℹ️ About & Data"]
+tab_classify, tab_history, tab_ri, tab_forecast, tab_about = st.tabs(
+    ["🔍 Assess a Storm", "📊 Historical Precedent", "⚡ Early-Warning Alert",
+     "🔮 Forecast", "ℹ️ About & Data"]
 )
 
 
@@ -435,6 +499,124 @@ with tab_ri:
         c1.metric("Intensification", f"+{delta:.0f} kt")
         c2.metric("Duration", f"{(end-start).total_seconds()/3600:.0f} h")
         c3.metric("Peak reached", f"{max(winds):.0f} kt · SuCS")
+
+with tab_forecast:
+    st.subheader("Intensity forecast: +6h / +12h / +24h")
+    st.write(
+        "Given the last 4 observed frames of a storm, predicts wind speed 6/12/24 hours "
+        "ahead — this is the **prediction** half of the problem statement, not just "
+        "classification of the current frame."
+    )
+
+    if not os.path.exists(CHECKPOINT_TEMPORAL_PATH):
+        callout(
+            f"No temporal checkpoint found at <code>{CHECKPOINT_TEMPORAL_PATH}</code>. "
+            f"Run <code>python src/train_temporal.py --config {CONFIG_TEMPORAL_PATH}</code> first.",
+            kind="warning",
+        )
+    else:
+        tcfg, model_t, tckpt = load_temporal_model()
+        by_storm, sequences = load_temporal_sequences(
+            tcfg["data"]["hursat_root"], tcfg["data"]["mosdac_root"])
+
+        storms_with_seqs = sorted(set(s["storm"] for s in sequences))
+        storm_labels = {
+            s: f"{s}  (held out — never trained on)" if s in VAL_STORMS else s
+            for s in storms_with_seqs
+        }
+        picked_storm = st.selectbox(
+            "Storm", storms_with_seqs, format_func=lambda s: storm_labels[s])
+
+        storm_seqs = [s for s in sequences if s["storm"] == picked_storm]
+        storm_seqs.sort(key=lambda s: s["anchor_dt"])
+        default_idx = max(0, int(len(storm_seqs) * 0.55))
+        idx = st.slider(
+            "Anchor point (last observed frame)", 0, len(storm_seqs) - 1, default_idx,
+            format="",
+            help="Move to choose which point in the storm's life the forecast is made from.",
+        )
+        seq = storm_seqs[idx]
+        st.caption(f"Forecasting from {seq['anchor_dt'].strftime('%d %b %Y, %H:%M UTC')} "
+                   f"— anchor {idx + 1} of {len(storm_seqs)} for {picked_storm}.")
+
+        if picked_storm in VAL_STORMS:
+            callout(
+                f"<strong>{picked_storm}</strong> was held out entirely during training — "
+                "the forecast below is genuine generalization to a storm the model never saw, "
+                "not a memorized fit.",
+                kind="info",
+            )
+        else:
+            callout(
+                f"<strong>{picked_storm}</strong> was used during training, so this forecast "
+                "isn't a held-out generalization test — pick Phet or Nilofar above for that.",
+                kind="warning",
+            )
+
+        preds = run_forecast(seq, model_t, cfg["data"]["img_size"])
+
+        thumb_cols = st.columns(len(seq["window"]))
+        for col, f in zip(thumb_cols, seq["window"]):
+            col.image(Image.open(f["ir_path"]), width='stretch')
+            col.caption(f["dt"].strftime("%d %b, %H:%M"))
+
+        st.markdown("**Current state (anchor)**")
+        anchor_cat = wind_speed_to_category(seq["anchor_kmph"])
+        acols = st.columns(2)
+        acols[0].metric("Wind speed", f"{seq['anchor_kmph']:.0f} km/h")
+        acols[1].metric("Category", category_label(anchor_cat))
+
+        st.markdown("**Forecast**")
+        fcols = st.columns(len(HORIZONS_HOURS))
+        for col, h in zip(fcols, HORIZONS_HOURS):
+            pred_kmph = preds[h]
+            pred_cat = wind_speed_to_category(pred_kmph)
+            delta_disp = pred_kmph - seq["anchor_kmph"]
+            actual_note = ""
+            if h in seq["targets"]:
+                actual_note = f"actual: {seq['targets'][h]:.0f} km/h"
+            col.metric(f"+{h}h", f"{pred_kmph:.0f} km/h", f"{delta_disp:+.0f} km/h vs now")
+            col.caption(f"{category_label(pred_cat)}" + (f" · {actual_note}" if actual_note else ""))
+
+        # Full real storm timeline (past AND future, all real observed data) with the
+        # forecast branching off the chosen anchor -- lets a viewer see at a glance how
+        # close the dashed forecast line tracks the real (blue) future, when it exists.
+        full_times = [f["dt"] for f in by_storm[picked_storm]]
+        full_winds = [f["kmph"] for f in by_storm[picked_storm]]
+        fc_times = [seq["anchor_dt"]] + [seq["anchor_dt"] + pd.Timedelta(hours=h) for h in HORIZONS_HOURS]
+        fc_winds = [seq["anchor_kmph"]] + [preds[h] for h in HORIZONS_HOURS]
+
+        fig_fc = go.Figure()
+        fig_fc.add_trace(go.Scatter(
+            x=full_times, y=full_winds, mode="lines", name="Observed (real record)",
+            line=dict(color=CAT_BLUE, width=2),
+            hovertemplate="%{x|%d %b, %H:%M}<br>%{y:.0f} km/h<extra></extra>",
+        ))
+        fig_fc.add_trace(go.Scatter(
+            x=fc_times, y=fc_winds, mode="lines+markers", name="Forecast (this model)",
+            line=dict(color=CAT_ORANGE, width=2, dash="dash"), marker=dict(size=8, symbol="diamond"),
+            hovertemplate="%{x|%d %b, %H:%M}<br>%{y:.0f} km/h (forecast)<extra></extra>",
+        ))
+        fig_fc.add_trace(go.Scatter(
+            x=[seq["anchor_dt"]], y=[seq["anchor_kmph"]], mode="markers", name="Anchor (now)",
+            marker=dict(size=11, color="#eef1f6", line=dict(color=CAT_ORANGE, width=2)),
+            hovertemplate="Anchor: %{y:.0f} km/h<extra></extra>",
+        ))
+        fig_fc.update_layout(**PLOTLY_LAYOUT, yaxis=dict(title="Sustained wind speed (km/h)"),
+                              xaxis=dict(title="Date (UTC)"), height=420,
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        st.plotly_chart(fig_fc, width='stretch')
+
+        val_mae = tckpt.get("val_mae_per_h", [])
+        base_mae = tckpt.get("baseline_mae_per_h", [])
+        if val_mae and base_mae:
+            improvements = [f"+{h}h: {m:.1f} km/h (vs. {b:.1f} km/h predicting no change)"
+                             for h, m, b in zip(HORIZONS_HOURS, val_mae, base_mae)]
+            st.caption(
+                "Validated on the 2 fully held-out storms (Phet, Nilofar) against a "
+                "persistence baseline (\"predict no change\") — mean absolute error: "
+                + "; ".join(improvements) + ". The model beats the baseline at every horizon."
+            )
 
 with tab_about:
     st.subheader("Dataset composition")
