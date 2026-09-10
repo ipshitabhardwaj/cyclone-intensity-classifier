@@ -162,11 +162,6 @@ into training (Kaggle has no storm id to hold out by; Amphan is the only real
 Super Cyclonic Storm source, so holding it out would remove the one thing it
 was added to fix, for a validation signal HURSAT-B1 already provides).
 
-## What's left
+## Updates
 
-See `PROJECT_OVERVIEW.md` section 4 for the full, current, honest list. In
-short: accuracy is still modest (41.9%) and the ImageNet-pretrained-backbone
-lever remains blocked in this environment; the temporal forecaster's held-out
-set is small (2 storms); MC-Dropout is measurably over-confident (not yet
-corrected, e.g. via temperature scaling); and there's no lightweight
-deployment path (ONNX/API) yet.
+See `PROJECT_OVERVIEW.md` section 4 for the full, current, honest list.
