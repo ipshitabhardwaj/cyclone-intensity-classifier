@@ -1,185 +1,172 @@
-# Cyclone Intensity Classification — SIH26070 MVP
+# Cyclone Intensity Classifier & Forecaster — SIH26070
 
-An AI/ML system that classifies tropical cyclone intensity from multi-channel
-satellite imagery (IMD's 8-category scale: LPA → Depression → Deep Depression
-→ Cyclonic Storm → Severe CS → Very Severe CS → Extremely Severe CS → Super
-Cyclonic Storm), estimates wind speed and central pressure, and explains each
-prediction with a Grad-CAM heatmap over the storm structure that drove it.
+**SIH26070** · AI/ML system for identification, classification, and prediction of tropical cyclone patterns using multi-source satellite data · Ministry of Earth Sciences / IMD · Disaster Management theme
 
-This is the **classification slice** of the full SIH26070 pipeline (identification
-+ classification + prediction). Genesis/detection and multi-day track
-prediction are the next build phases — see "Next steps" below.
+An AI/ML system that classifies tropical cyclone intensity from real multi-channel
+satellite imagery on IMD's 8-category scale (Low Pressure Area → Depression → Deep
+Depression → Cyclonic Storm → Severe CS → Very Severe CS → Extremely Severe CS →
+Super Cyclonic Storm), estimates wind speed **and central pressure**, forecasts
+intensity **+6h/+12h/+24h ahead**, flags Rapid Intensification, and explains every
+prediction with a Grad-CAM heatmap and an MC-Dropout confidence score.
 
-## Status: pipeline verified end-to-end on synthetic data
+For the full narrative (methodology, honest results, what's been tried and
+rejected, what's left) see **[`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md)**. This
+file is the shorter "what is this / how do I run it" entry point.
 
-No real satellite data was available at build time (MOSDAC registration /
-CyINSAT download take time to arrange), so the pipeline was built and
-smoke-tested against **synthetic data that mirrors the real CyINSAT schema
-exactly**. Swap in the real dataset and nothing else changes — same file
-layout, same column names, same code.
+## Status: trained end-to-end on real satellite data, not synthetic
 
-A 4-epoch CPU smoke run on 24 synthetic storms already shows the loop is
-learning real structure (not just running without crashing):
+Earlier versions of this project used synthetic data and a single small
+Kaggle dataset (136 images, no storm ids, no pressure). That stage is done.
+The current pipeline trains on **1,032 real labeled images from three
+independent sources**, unified into one pool:
 
-| Epoch | Val Accuracy | Val Wind MAE | Val Pressure MAE |
-|-------|-------------|--------------|-------------------|
-| 1     | 23.1%       | 44.3 km/h    | 23.5 hPa          |
-| 4     | 55.1%       | 18.2 km/h    | 9.0 hPa           |
+| Source | What it is | Volume |
+|---|---|---|
+| Kaggle "INSAT3D Infrared & Raw Cyclone Imagery" | Public dataset, no storm id, wind-speed label only | 136 images |
+| NOAA HURSAT-B1 v06 | 10 real North Indian Ocean cyclones (2008–2016) | 680 frames |
+| MOSDAC (Cyclone Amphan, 2020) | Real MOSDAC data order matched to the official IMD best track | 216 frames |
 
-Grad-CAM on the synthetic eyewall structure correctly highlights the ring
-(see `outputs/gradcam/*.png`) — the model is attending to storm structure,
-not memorizing noise. With real CyINSAT data, more epochs, and a GPU, expect
-substantially better numbers (published work on this exact task reports
-90%+ classification accuracy and single-digit-hPa pressure MAE — see the
-papers cited in the project chat history).
+**Model:** CycloneNet — an EfficientNet-B0 backbone taking a 2-channel (IR + raw)
+input, with an 8-way classification head and a 2-output regression head (wind
+speed + pressure, mb).
 
-## Status: also trained on real INSAT-3D data (small, but real)
+**Validation is a storm-held-out split** — 2 entire HURSAT-B1 storms (Phet,
+Nilofar) never seen in training at all, not just held-out images — so the
+numbers below reflect generalizing to an unseen storm, not memorizing frames
+from one already seen 3 hours earlier.
 
-We found a real, already-public dataset with no approval wait — **[INSAT3D
-Infrared & Raw Cyclone Imagery (2012–2021)](https://www.kaggle.com/datasets/sshubam/insat3d-infrared-raw-cyclone-images-20132021)**
-by Sshubam Verma — and trained the same model on it. Be upfront about its
-shape before quoting these numbers anywhere: it's **136 labeled images
-total**, with **no cyclone/storm id or timestamp** (just an image and a wind
-speed in knots), and **no pressure label**. That means: no storm-level split
-was possible (a plain random 80/20 split was used instead — see
-`kaggle_dataset.py`'s docstring), the regression head predicts wind speed
-only, and both rare classes (Depression: 2 images, Super Cyclonic Storm: 1
-image) are too few to evaluate meaningfully. Treat this as **"the real-data
-plumbing works,"** not a benchmark result — CyINSAT (111k images, 39 storms,
-proper storm ids) or full MOSDAC access is what a credible number for the
-pitch deck needs.
-
-30-epoch CPU run, no ImageNet pretraining (weight download is blocked in
-this sandbox — see below), 109 train / 27 val images:
+**Current honest results** (held-out storms, `checkpoints_combined/best.pt`):
 
 | Metric | Value |
 |---|---|
-| Best val accuracy (epoch 16) | 44.4% |
-| Val wind speed MAE | 30.4 km/h |
-| Val weighted F1 | 0.40 |
+| Classification accuracy | 41.9% |
+| Wind speed MAE | 27.2 km/h |
+| Pressure MAE | 10.2 mb |
+| MC-Dropout calibration (ECE) | 0.103 (moderately over-confident) |
 
-Train accuracy climbed to 93%+ while val accuracy stayed noisy in the
-25–44% band — that gap **is** the 109-image dataset, not a bug; expect it to
-close substantially with CyINSAT's 111k images and real ImageNet weights.
-Grad-CAM outputs for 6 validation storms are in `outputs_real/gradcam/`.
-Reproduce with:
+**Temporal forecaster** (`checkpoints_temporal/best.pt`) — given the last 4
+observed frames of a storm, predicts wind speed **+6h/+12h/+24h ahead**,
+beating a persistence ("no change") baseline at every horizon on the same
+held-out storms:
+
+| Horizon | Persistence baseline (MAE) | Forecaster (MAE) |
+|---|---|---|
+| +6h  | 9.63 km/h  | 9.05 km/h  |
+| +12h | 19.26 km/h | 16.79 km/h |
+| +24h | 38.48 km/h | 30.59 km/h |
+
+Backbone is frozen from `checkpoints_combined/best.pt`; only a small GRU head
+is trained on top of it. See `PROJECT_OVERVIEW.md` section 1 for why the
+model predicts a *delta* from current wind speed rather than an absolute value.
+
+**Tried and honestly rejected:** class-weighted loss for the Low Pressure Area
+imbalance (4 training examples) made overall accuracy worse (36.0% vs 41.9%)
+and didn't fix LPA recall (still 0.00) — the code is in `train_combined.py`
+but was not adopted. See `PROJECT_OVERVIEW.md` section 4 for why.
+
+## Dashboard (Streamlit)
 
 ```bash
-python src/train_real.py --config configs/config_real.yaml
-python src/evaluate_real.py --config configs/config_real.yaml --checkpoint checkpoints_real/best.pt
+streamlit run app.py
 ```
+
+Five tabs, all reading live from the current checkpoints and manifests
+(nothing hardcoded):
+
+- **🔍 Assess a Storm** — classify any dataset image or an uploaded one; shows
+  predicted category, wind speed, pressure, a Grad-CAM heatmap, and an
+  MC-Dropout confidence score.
+- **📊 Historical Precedent** — retrieves the closest real historical matches
+  by embedding similarity ("this looks like Amphan at similar intensity").
+- **⚡ Early-Warning Alert** — Rapid Intensification detection (Kaplan &
+  DeMaria 2003 threshold) validated against Amphan's real best-track record.
+- **🔮 Forecast** — pick any storm and time point, see the temporal model's
+  own live +6h/+12h/+24h forecast plotted against the real outcome, plus an
+  RI check run on the model's own predictions (not just historical data).
+- **ℹ️ About & Data** — dataset composition, known limitations, honest caveats.
 
 ## Project structure
 
 ```
 cyclone-mvp/
-├── configs/config.yaml       # all paths + hyperparameters live here
+├── app.py                          # Streamlit dashboard (5 tabs, see above)
+├── PROJECT_OVERVIEW.md             # full narrative: methodology, results, what's left
+├── configs/
+│   ├── config_combined.yaml        # the CURRENT pipeline: classifier + pressure head
+│   ├── config_temporal.yaml        # temporal forecaster
+│   ├── config_real.yaml            # legacy: Kaggle-only, wind-only (superseded)
+│   └── config.yaml                 # legacy: synthetic/CyINSAT-schema data (superseded)
 ├── src/
-│   ├── utils.py               # IMD category thresholds, config/seed helpers
-│   ├── synthetic_data.py      # generates CyINSAT-schema stand-in data
-│   ├── dataset.py             # PyTorch Dataset, storm-level train/val split
-│   ├── model.py                # EfficientNet-B0, N-channel input, dual head
-│   ├── gradcam.py              # Grad-CAM explainability
-│   ├── train.py                 # training loop (CyINSAT-schema / synthetic data)
-│   ├── evaluate.py              # confusion matrix, MAE, Grad-CAM (synthetic path)
-│   ├── kaggle_dataset.py        # Dataset for the real Kaggle INSAT-3D data (see below)
-│   ├── train_real.py            # training loop for the real Kaggle data
-│   └── evaluate_real.py         # confusion matrix, MAE, Grad-CAM (real-data path)
+│   ├── utils.py                    # IMD category thresholds, config/seed helpers
+│   ├── model.py                    # EfficientNet-B0, 2-channel input, dual head
+│   ├── kaggle_dataset.py           # shared sample format + Dataset used by all 3 sources
+│   ├── hursat_dataset.py           # NOAA HURSAT-B1 preprocessing
+│   ├── mosdac_dataset.py           # MOSDAC/Amphan preprocessing (GeoTIFF, best-track matching)
+│   ├── train_combined.py           # CURRENT training loop: all 3 sources, storm-held-out val
+│   ├── temporal_dataset.py         # builds per-storm sequences for the forecaster
+│   ├── temporal_model.py           # GRU-over-frozen-backbone forecaster
+│   ├── train_temporal.py           # forecaster training loop, persistence-baseline comparison
+│   ├── ri_alert.py                 # Rapid Intensification threshold detection (source-agnostic)
+│   ├── gradcam.py                  # Grad-CAM explainability
+│   ├── uncertainty.py              # MC-Dropout confidence estimation
+│   ├── calibration_check.py        # is MC-Dropout confidence actually calibrated? (ECE + reliability table)
+│   ├── historical_comparison.py    # embedding-based nearest-neighbour retrieval
+│   └── train_real.py / evaluate_real.py / train.py / evaluate.py   # legacy, superseded by train_combined.py
 ├── data/
-│   ├── cyinsat/                  # synthetic (or real CyINSAT-schema) data lives here
-│   └── kaggle_insat3d/           # the real Kaggle dataset (see "Real-data run" above)
-├── checkpoints/, checkpoints_real/    # saved model weights (synthetic vs. real-data run)
-├── outputs/, outputs_real/            # training logs + Grad-CAM images
+│   ├── kaggle_insat3d/             # the 136-image Kaggle set
+│   ├── hursat_processed/           # preprocessed HURSAT-B1 frames + manifest.csv
+│   ├── mosdac_processed/           # preprocessed MOSDAC/Amphan frames + manifest.csv
+│   └── besttrack/                  # IMD best-track records (Amphan)
+├── checkpoints_combined/best.pt    # CURRENT production classifier + regression checkpoint
+├── checkpoints_temporal/best.pt    # CURRENT production forecaster checkpoint
 └── requirements.txt
 ```
 
-## Data schema (matches CyINSAT)
-
-```
-data/cyinsat/
-├── details.csv        # one row per cyclone: cyclone_id, name, basin, max_wind_kmph, min_pressure_hpa, num_frames
-├── parameters.csv      # one row per frame: cyclone_id, frame_idx, wind_speed_kmph, pressure_hpa, category_idx,
-│                        #                     lat, lon, ir1_path, ir2_path, mir_path, wv_path
-└── images/
-    └── <cyclone_id>/
-        ├── IR1/000.png, 001.png, ...
-        ├── IR2/...
-        ├── MIR/...
-        └── WV/...
-```
-
-Train/val splits happen at the **storm level**, not the frame level — frames
-from the same cyclone never appear in both sets, otherwise the model can
-cheat by memorizing a storm's specific cloud texture instead of learning the
-general wind-speed ↔ structure relationship. This matters a lot for judges
-who understand ML — it's a common mistake in published student projects on
-this exact task.
-
-## Running it here (CPU, synthetic data — already done once)
+## Running it
 
 ```bash
 pip install -r requirements.txt
-python src/synthetic_data.py configs/config.yaml   # regenerate synthetic data
-python src/train.py --config configs/config.yaml
-python src/evaluate.py --config configs/config.yaml --checkpoint checkpoints/best.pt
+
+# Train the classifier + pressure head (all 3 real data sources)
+python src/train_combined.py --config configs/config_combined.yaml
+
+# Train the temporal forecaster (reuses the classifier's frozen backbone --
+# retrain this too if you retrain the classifier, since the backbone's
+# feature space will have changed)
+python src/train_temporal.py --config configs/config_temporal.yaml
+
+# Check MC-Dropout calibration
+python src/calibration_check.py --config configs/config_combined.yaml --checkpoint checkpoints_combined/best.pt
+
+# Launch the dashboard
+streamlit run app.py
 ```
 
-## Scaling up beyond the 136-image Kaggle run
+`pretrained: true` in `configs/config_combined.yaml` will only actually take
+effect where `download.pytorch.org` is reachable — it's currently blocked in
+the sandbox this was built in, so the model trains from random
+initialization there. Worth re-testing on a machine with normal internet
+access; a real ImageNet-pretrained backbone is the single biggest lever left
+on accuracy (see `PROJECT_OVERVIEW.md` section 4).
 
-1. **Get more data.** Either wait on [MOSDAC](https://www.mosdac.gov.in/)
-   registration approval for INSAT-3D/3DR archives directly, or track down
-   the **CyINSAT** dataset (39 North Indian Ocean cyclones 2014–2022, 111k
-   images, already labeled with wind/pressure/position AND cyclone ids —
-   as of writing it isn't actually published on Kaggle despite the paper
-   saying it would be; try emailing the corresponding author or checking
-   Kaggle again later).
-2. **Reshape it to match the schema above.** If the source distributes a
-   different folder layout, write a small conversion script that produces
-   `details.csv` / `parameters.csv` / `images/<cyclone_id>/<channel>/*.png`
-   in this exact format — everything downstream (`dataset.py` onward) then
-   works unchanged.
-3. **Point `configs/config.yaml`'s `data.root` at the new folder.** No code
-   changes needed.
-4. **On Colab:** Runtime → Change runtime type → GPU. Then:
-   ```bash
-   !pip install -r requirements.txt
-   !python src/train.py --config configs/config.yaml
-   ```
-   With a GPU, `pretrained: true` in the config will actually succeed in
-   downloading ImageNet weights (blocked in this sandbox's network), which
-   should meaningfully improve accuracy and reduce epochs needed.
-5. **On Kaggle:** create a notebook, add the CyINSAT dataset as a Kaggle
-   Dataset input, set accelerator to GPU T4/P100, upload this repo as a
-   Kaggle Dataset or paste the `src/` files into notebook cells, then run
-   the same two commands.
-6. **Bump `train.epochs`** in the config to 30–50 once on a GPU — the 4-epoch
-   CPU smoke test above is just a correctness check, not a real training run.
+## Storm-held-out validation (why it matters)
 
-## Next steps (to complete the full SIH26070 vision)
+Train/val splits happen at the **storm level**, not the frame level —
+`VAL_STORMS = {"PHET", "NILOFAR"}` in `train_combined.py` and
+`temporal_dataset.py` are held out entirely, never seen in training. A random
+split over 3-hourly frames of the same storm would put near-duplicate frames
+on both sides and inflate accuracy without proving anything about
+generalization to a storm the model hasn't seen — a common mistake in
+published work on this exact task. Kaggle and MOSDAC/Amphan samples all go
+into training (Kaggle has no storm id to hold out by; Amphan is the only real
+Super Cyclonic Storm source, so holding it out would remove the one thing it
+was added to fix, for a validation signal HURSAT-B1 already provides).
 
-- **Genesis/detection stage**: add a binary "cyclonic disturbance present"
-  classifier or lightweight object detector running on raw MOSDAC frames
-  *before* a storm is officially named, to demonstrate lead-time over IMD's
-  manual process — this is the strongest differentiator for judges.
-- **Track + intensity prediction**: a ConvLSTM or small transformer over a
-  24–48h window of frames (this classifier's backbone can be reused as the
-  per-frame feature extractor feeding into it), forecasting +24h/+48h/+72h
-  track and intensity, plus a rapid-intensification early-warning flag.
-- **Multi-source fusion**: concatenate scatterometer wind vectors and ERA5
-  reanalysis features (SST, wind shear) with the image-derived features
-  before the prediction head.
-- **Dashboard**: a Streamlit app (already in `requirements.txt`) showing
-  live classification, the Grad-CAM overlay, and a track map — this is the
-  fastest way to turn this repo into a compelling live demo for the pitch.
-- **Uncertainty quantification**: MC-dropout or an ensemble to produce a
-  cone-of-uncertainty for track predictions, mirroring IMD's own bulletins.
+## What's left
 
-## Notes on the synthetic data generator
-
-`src/synthetic_data.py` renders a Gaussian "eyewall" ring whose radius,
-sharpness, and (above a threshold) a visible "eye" scale with a synthetic
-wind-speed lifecycle curve (ramp-up, peak, decay) per storm — it is **not**
-real satellite physics, just enough structure for the pipeline to have a
-genuine signal to learn, so a working training loop can be verified before
-real data is in hand. Delete `data/cyinsat/` and rerun the generator any time
-you want a fresh synthetic set (e.g. more storms, different `img_size`).
+See `PROJECT_OVERVIEW.md` section 4 for the full, current, honest list. In
+short: accuracy is still modest (41.9%) and the ImageNet-pretrained-backbone
+lever remains blocked in this environment; the temporal forecaster's held-out
+set is small (2 storms); MC-Dropout is measurably over-confident (not yet
+corrected, e.g. via temperature scaling); and there's no lightweight
+deployment path (ONNX/API) yet.
