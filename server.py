@@ -9,6 +9,7 @@ import sys
 import json
 import base64
 import urllib.parse
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import numpy as np
@@ -268,8 +269,18 @@ class CycloneRequestHandler(BaseHTTPRequestHandler):
             for m in matches:
                 m_sample = next(samp for samp in samples if samp["img_name"] == m["img_name"])
                 m_pil = Image.open(m_sample["ir_path"])
+                storm = m_sample.get("storm")
+                dt_iso = m_sample.get("datetime_utc")
+                display_date = None
+                if dt_iso:
+                    try:
+                        display_date = datetime.fromisoformat(dt_iso).strftime("%b %d, %Y")
+                    except ValueError:
+                        display_date = None
                 matches_res.append({
                     "img_name": m["img_name"],
+                    "storm": storm.title() if storm else None,
+                    "display_date": display_date,
                     "percentile": round(m["percentile"], 1),
                     "cat_idx": m["cat_idx"],
                     "cat_name": category_label(m["cat_idx"]),

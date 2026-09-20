@@ -4,110 +4,136 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CycloSense — Meteorological Intelligence Platform</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%230369a1%22/><path d=%22M11 12h9a2.5 2.5 0 1 0-2.5-2.5%22 stroke=%22white%22 stroke-width=%222.2%22 fill=%22none%22 stroke-linecap=%22round%22/><path d=%22M9 17h12a2.7 2.7 0 1 1-2.7 2.7%22 stroke=%22white%22 stroke-width=%222.2%22 fill=%22none%22 stroke-linecap=%22round%22/><path d=%22M13 22h7a2 2 0 1 0-2-2%22 stroke=%22white%22 stroke-width=%222.2%22 fill=%22none%22 stroke-linecap=%22round%22/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app-container">
-    <!-- Navigation Tabs -->
-    <nav class="tabs-nav">
-      <button class="tab-btn active" data-tab="landing">🏠 Home</button>
-      <button class="tab-btn" data-tab="assess">🔍 Assess a Storm</button>
-      <button class="tab-btn" data-tab="history">📊 Historical Precedent</button>
-      <button class="tab-btn" data-tab="ri">⚡ Early-Warning Alert</button>
-      <button class="tab-btn" data-tab="forecast">🔮 Forecast</button>
-      <button class="tab-btn" data-tab="about">ℹ️ About &amp; Data</button>
-    </nav>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"></path></svg></div>
+        <div>
+          <div class="brand-title">CycloSense</div>
+          <div class="brand-subtitle">SIH26070 &middot; IMD/MOES</div>
+        </div>
+      </div>
 
-    <!-- Main Content Area -->
-    <main class="main-content">
-      <!-- TAB 0: LANDING PAGE -->
-      <section id="tab-landing" class="tab-content active">
-        <div class="landing-hero-card">
-          <div class="landing-badge animate-pop delay-1">🌀 SIH26070 &bull; DISASTER MANAGEMENT &bull; IMD / MOES</div>
-          <h1 class="landing-title animate-fade-up delay-2">CycloSense</h1>
-          <p class="landing-sub animate-fade-up delay-3">Next-Generation AI Platform for Real-Time Tropical Cyclone Intensity Classification, Central Pressure Estimation &amp; +24h Horizon Forecasting.</p>
+      <!-- Navigation Tabs -->
+      <nav class="tabs-nav">
+        <button class="tab-btn active" data-tab="landing"><svg class="tab-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg><span>Overview</span></button>
+        <button class="tab-btn" data-tab="assess"><svg class="tab-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg><span>Assess a Storm</span></button>
+        <button class="tab-btn" data-tab="history"><svg class="tab-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg><span>Historical Precedent</span></button>
+        <button class="tab-btn" data-tab="ri"><svg class="tab-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg><span>Early-Warning Alert</span></button>
+        <button class="tab-btn" data-tab="forecast"><svg class="tab-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg><span>Forecast</span></button>
+        <button class="tab-btn" data-tab="about"><svg class="tab-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg><span>About &amp; Data</span></button>
+      </nav>
 
-          <div class="hero-actions animate-pop delay-4">
-            <button class="btn-cta" onclick="document.querySelector('[data-tab=assess]').click()">🔍 Launch Storm Assessment &rarr;</button>
-            <button class="btn-cta btn-secondary" onclick="document.querySelector('[data-tab=forecast]').click()">🔮 Run +24h Forecast &rarr;</button>
-          </div>
+      <div class="sidebar-footer">
+        <div class="status-row"><span class="status-row-dot"></span>Satellite Feed</div>
+        <div class="status-row"><span class="status-row-dot"></span>Inference Engine</div>
+        <div class="status-row"><span class="status-row-dot"></span>Alert System</div>
+        <div class="sidebar-version">CYCLOSENSE v1.0</div>
+      </div>
+    </aside>
 
-          <!-- Metric Strip -->
-          <div class="landing-metrics-strip">
-            <div class="metric-strip-card animate-fade-up delay-4">
-              <div class="m-val">1,032</div>
-              <div class="m-title">Labeled Frames</div>
-              <div class="m-sub">INSAT-3D, NOAA HURSAT-B1, MOSDAC</div>
+    <div class="main-area">
+      <header class="topbar">
+        <div class="topbar-heading">
+          <h1 id="topbar-title">Overview</h1>
+          <p id="topbar-sub">Real-time tropical cyclone intelligence platform</p>
+        </div>
+        <div class="status-badge"><span class="status-dot"></span>Model Live</div>
+      </header>
+
+      <!-- Main Content Area -->
+      <main class="app-container">
+        <!-- TAB 0: OVERVIEW -->
+        <section id="tab-landing" class="tab-content active">
+          <div class="welcome-panel animate-fade-up delay-1">
+            <div class="welcome-panel-main">
+              <div class="welcome-panel-text">
+                <div class="landing-badge"><svg class="badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"></path></svg>SIH26070 &bull; DISASTER MANAGEMENT</div>
+                <h2 class="landing-title">Tropical Cyclone Intelligence</h2>
+                <p class="landing-sub">Real-time intensity classification, central pressure estimation &amp; +24h horizon forecasting from multi-source satellite imagery.</p>
+                <div class="landing-meta"><span>IMD Scale 0&ndash;8</span><span class="meta-sep">&middot;</span><span>+24H Horizon</span><span class="meta-sep">&middot;</span><span>Live Inference</span></div>
+              </div>
+              <div class="hero-actions">
+                <button class="btn-cta" onclick="document.querySelector('[data-tab=assess]').click()"><svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>Launch Assessment</button>
+                <button class="btn-cta btn-secondary" onclick="document.querySelector('[data-tab=forecast]').click()"><svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>Run Forecast</button>
+              </div>
             </div>
-            <div class="metric-strip-card animate-fade-up delay-5">
-              <div class="m-val">41.9%</div>
-              <div class="m-title">Generalization</div>
-              <div class="m-sub">Strict storm-held-out validation</div>
-            </div>
-            <div class="metric-strip-card animate-fade-up delay-6">
-              <div class="m-val">8 Scale</div>
-              <div class="m-title">IMD Categories</div>
-              <div class="m-sub">Depression &rarr; Super Cyclonic Storm</div>
-            </div>
-            <div class="metric-strip-card animate-fade-up delay-7">
-              <div class="m-val">+24h</div>
-              <div class="m-title">Horizon Forecaster</div>
-              <div class="m-sub">Beats persistence baseline</div>
+
+            <!-- Metric Strip (nested inside the same panel, not a separate box) -->
+            <div class="landing-metrics-strip">
+              <div class="metric-strip-card">
+                <div class="m-val">1,032</div>
+                <div class="m-title">Labeled Frames</div>
+                <div class="m-sub">INSAT-3D, NOAA HURSAT-B1, MOSDAC</div>
+              </div>
+              <div class="metric-strip-card">
+                <div class="m-val">41.9%</div>
+                <div class="m-title">Generalization</div>
+                <div class="m-sub">Strict storm-held-out validation</div>
+              </div>
+              <div class="metric-strip-card">
+                <div class="m-val">8 Scale</div>
+                <div class="m-title">IMD Categories</div>
+                <div class="m-sub">Depression &rarr; Super Cyclonic Storm</div>
+              </div>
+              <div class="metric-strip-card">
+                <div class="m-val">+24h</div>
+                <div class="m-title">Horizon Forecaster</div>
+                <div class="m-sub">Beats persistence baseline</div>
+              </div>
             </div>
           </div>
 
           <!-- Capabilities Grid -->
-          <div class="section-title-block margin-top animate-fade-up delay-5">
-            <h3 style="font-size: 1.25rem;">Core Platform Capabilities</h3>
+          <div class="section-title-block animate-fade-up delay-3">
+            <h3>Core Platform Capabilities</h3>
             <p>End-to-end AI workflow designed for operational disaster management</p>
           </div>
 
           <div class="landing-highlights">
-            <div class="highlight-card animate-pop delay-5" onclick="document.querySelector('[data-tab=assess]').click()">
-              <div class="highlight-icon">🌀</div>
+            <div class="highlight-card animate-pop delay-4" onclick="document.querySelector('[data-tab=assess]').click()">
+              <div class="highlight-icon-badge"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"></path></svg></div>
               <div class="highlight-title">Intensity &amp; Pressure</div>
               <div class="highlight-desc">Dual regression estimating sustained wind speed (km/h) &amp; central pressure (mb).</div>
             </div>
-            <div class="highlight-card animate-pop delay-6" onclick="document.querySelector('[data-tab=assess]').click()">
-              <div class="highlight-icon">👁️</div>
+            <div class="highlight-card animate-pop delay-5" onclick="document.querySelector('[data-tab=assess]').click()">
+              <div class="highlight-icon-badge"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></div>
               <div class="highlight-title">Grad-CAM Focus</div>
               <div class="highlight-desc">Visual spatial heatmaps highlighting cloud eye &amp; eyewall convective structures.</div>
             </div>
-            <div class="highlight-card animate-pop delay-7" onclick="document.querySelector('[data-tab=assess]').click()">
-              <div class="highlight-icon">🎯</div>
+            <div class="highlight-card animate-pop delay-6" onclick="document.querySelector('[data-tab=assess]').click()">
+              <div class="highlight-icon-badge"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg></div>
               <div class="highlight-title">MC-Dropout Confidence</div>
               <div class="highlight-desc">Monte Carlo sampling across 30 passes providing calibrated uncertainty bounds.</div>
             </div>
-            <div class="highlight-card animate-pop delay-6" onclick="document.querySelector('[data-tab=forecast]').click()">
-              <div class="highlight-icon">🔮</div>
+            <div class="highlight-card animate-pop delay-4" onclick="document.querySelector('[data-tab=forecast]').click()">
+              <div class="highlight-icon-badge"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg></div>
               <div class="highlight-title">Temporal Forecasting</div>
               <div class="highlight-desc">Sequence neural network predicting intensity trend at +6h, +12h, and +24h.</div>
             </div>
-            <div class="highlight-card animate-pop delay-7" onclick="document.querySelector('[data-tab=ri]').click()">
-              <div class="highlight-icon">⚡</div>
+            <div class="highlight-card animate-pop delay-5" onclick="document.querySelector('[data-tab=ri]').click()">
+              <div class="highlight-icon-badge"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg></div>
               <div class="highlight-title">Rapid Intensification</div>
               <div class="highlight-desc">Automated detection of Kaplan &amp; DeMaria +30kt / 24h warning triggers.</div>
             </div>
-            <div class="highlight-card animate-pop delay-8" onclick="document.querySelector('[data-tab=history]').click()">
-              <div class="highlight-icon">📊</div>
+            <div class="highlight-card animate-pop delay-6" onclick="document.querySelector('[data-tab=history]').click()">
+              <div class="highlight-icon-badge"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg></div>
               <div class="highlight-title">Historical Precedents</div>
               <div class="highlight-desc">Cosine feature embedding search finding similar historical cyclone archives.</div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
       <!-- TAB 1: ASSESS A STORM -->
       <section id="tab-assess" class="tab-content">
-        <div class="section-header">
-          <h2>Assess a Storm</h2>
-          <p>Analyze satellite imagery and estimate cyclone intensity in real time.</p>
-        </div>
-
         <div class="card selector-card">
           <label for="sample-select" class="control-label">Select Satellite Image:</label>
           <select id="sample-select" class="form-select"></select>
@@ -155,22 +181,12 @@
 
       <!-- TAB 2: HISTORICAL PRECEDENT -->
       <section id="tab-history" class="tab-content">
-        <div class="section-header">
-          <h2>Historical Precedent</h2>
-          <p>Find historical cyclones with matching cloud structure and intensity profiles.</p>
-        </div>
-
         <div class="grid grid-4" id="history-grid"></div>
         <p class="caption margin-top">Percentile matches computed against feature embeddings across the entire historical record.</p>
       </section>
 
       <!-- TAB 3: EARLY-WARNING ALERT -->
       <section id="tab-ri" class="tab-content">
-        <div class="section-header">
-          <h2>Early-Warning Assessment</h2>
-          <p>Automated detection of Rapid Intensification (+30kt / 24h threshold) on historical record.</p>
-        </div>
-
         <div class="metrics-grid" id="ri-metrics"></div>
 
         <div class="card chart-card">
@@ -181,7 +197,7 @@
         </div>
 
         <div class="callout info">
-          <span class="callout-icon">ℹ️</span>
+          <span class="callout-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span>
           <div>
             <strong>Why was this alert raised?</strong><br>
             The alert triggers when sustained wind speeds increase by at least 30 knots within a 24-hour window (Kaplan &amp; DeMaria, 2003 standard). Cyclone Amphan (2020) underwent explosive intensification from Category 1 equivalent to Super Cyclonic Storm status.
@@ -191,11 +207,6 @@
 
       <!-- TAB 4: FORECAST -->
       <section id="tab-forecast" class="tab-content">
-        <div class="section-header">
-          <h2>Intensity Forecast</h2>
-          <p>Multi-horizon wind speed predictions (+6h, +12h, +24h) from sequence satellite frames.</p>
-        </div>
-
         <div class="grid grid-2 controls-grid">
           <div class="card">
             <label for="storm-select" class="control-label">Select Storm:</label>
@@ -232,11 +243,6 @@
 
       <!-- TAB 5: ABOUT & DATA -->
       <section id="tab-about" class="tab-content">
-        <div class="section-header">
-          <h2>Model &amp; Dataset Information</h2>
-          <p>Dataset composition, training validation setup, and model architecture specs.</p>
-        </div>
-
         <div class="metrics-grid" id="about-metrics"></div>
 
         <div class="card chart-card">
@@ -254,17 +260,30 @@
           <p class="caption">Validation is measured on 2 entire storms held out during training (Phet, Nilofar).</p>
         </div>
 
-        <div class="card limitations-card">
-          <div class="card-header">Known Limitations</div>
-          <ul class="limitations-list">
-            <li><strong>Dataset size:</strong> 1,032 labeled images total (136 single Kaggle frames with no storm ID, 680 NOAA HURSAT-B1 frames across 10 real storms, 216 MOSDAC frames of Cyclone Amphan) — small for an 8-way classifier, and imbalanced.</li>
-            <li><strong>Validation split:</strong> Kaggle and Amphan portions have no held-out storms, so all of those images are in training. Validation is 2 HURSAT-B1 storms (136 frames) held out entirely.</li>
-            <li><strong>Pressure labels:</strong> No pressure label from Kaggle or HURSAT-B1 sources — wind speed only (Amphan's IMD best track does have pressure, currently unused since the model has a single-output wind-only regression head).</li>
-            <li><strong>Backbone initialization:</strong> No ImageNet-pretrained backbone used — checkpoint trained from random initialization.</li>
-          </ul>
+        <div class="section-title-block" style="margin-top:1.8rem;">
+          <h3>Known Limitations</h3>
+        </div>
+        <div class="limitations-grid">
+          <div class="limitation-card">
+            <span class="limitation-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></span>
+            <div><strong>Dataset size</strong><p>1,032 labeled images total (136 single Kaggle frames with no storm ID, 680 NOAA HURSAT-B1 frames across 10 real storms, 216 MOSDAC frames of Cyclone Amphan) — small for an 8-way classifier, and imbalanced.</p></div>
+          </div>
+          <div class="limitation-card">
+            <span class="limitation-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></span>
+            <div><strong>Validation split</strong><p>Kaggle and Amphan portions have no held-out storms, so all of those images are in training. Validation is 2 HURSAT-B1 storms (136 frames) held out entirely.</p></div>
+          </div>
+          <div class="limitation-card">
+            <span class="limitation-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></span>
+            <div><strong>Pressure labels</strong><p>No pressure label from Kaggle or HURSAT-B1 sources — wind speed only (Amphan's IMD best track does have pressure, currently unused since the model has a single-output wind-only regression head).</p></div>
+          </div>
+          <div class="limitation-card">
+            <span class="limitation-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></span>
+            <div><strong>Backbone initialization</strong><p>No ImageNet-pretrained backbone used — checkpoint trained from random initialization.</p></div>
+          </div>
         </div>
       </section>
-    </main>
+      </main>
+    </div>
   </div>
 
   <script src="app.js"></script>
