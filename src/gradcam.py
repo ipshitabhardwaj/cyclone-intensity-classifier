@@ -64,8 +64,13 @@ class GradCAM:
 
 def overlay_heatmap(base_gray: np.ndarray, heatmap: np.ndarray) -> np.ndarray:
     """base_gray in [0,1], heatmap in [0,1] -> RGB uint8 image with heatmap overlay."""
-    import matplotlib.cm as cm
-    colored = cm.get_cmap("jet")(heatmap)[..., :3]  # (H,W,3) in [0,1]
+    import matplotlib.pyplot as plt
+    try:
+        cmap = plt.get_cmap("jet")
+    except Exception:
+        import matplotlib.cm as cm
+        cmap = cm.colormaps["jet"] if hasattr(cm, "colormaps") else cm.get_cmap("jet")
+    colored = cmap(heatmap)[..., :3]  # (H,W,3) in [0,1]
     base_rgb = np.stack([base_gray] * 3, axis=-1)
     blended = 0.55 * base_rgb + 0.45 * colored
-    return (np.clip(blended, 0, 1) * 255).astype(np.uint8)
+    return np.clip(blended, 0.0, 1.0)

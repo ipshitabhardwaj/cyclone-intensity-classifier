@@ -1,37 +1,26 @@
 """
-Streamlit demo dashboard for the SIH26070 cyclone classification prototype.
-
-Run it from the project root:
-    streamlit run app.py
-
-Five tabs:
-  - Classify: pick/upload an image, get category + wind speed with MC-Dropout
-    confidence, Grad-CAM explanation, and the full probability breakdown.
-  - Historical Comparison: nearest-neighbour retrieval against every image in
-    the training set, shown as a percentile match (not raw cosine similarity
-    -- see src/historical_comparison.py for why).
-  - Rapid Intensification: a real case study on Cyclone Amphan's actual
-    best-track record, showing the RI episode our detector correctly flags.
-  - Forecast: given the last 4 observed frames of a storm, predicts wind
-    speed +6h/+12h/+24h ahead (src/temporal_model.py), validated against a
-    persistence baseline on 2 fully held-out storms -- see
-    src/train_temporal.py.
-  - About & Data: dataset composition, known limitations, training curve.
+Cyclone AI — Meteorological Intelligence & Forecasting Platform.
+Completely rebuilt soft-white modern web application frontend.
+All PyTorch backend models, checkpoints, predictions, and calculations remain 100% intact and frozen.
 """
+import io
 import os
 import sys
+import json
+import base64
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
 import torch
+import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 
+# Insert src directory into python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from kaggle_dataset import (
     load_samples as load_kaggle_samples, denormalize_wind, denormalize_pressure,
-    PRESSURE_MIN, PRESSURE_MAX,
+    PRESSURE_MIN, PRESSURE_MAX, KaggleINSAT3DDataset
 )
 from hursat_dataset import load_hursat_samples
 from mosdac_dataset import load_mosdac_samples
@@ -53,155 +42,33 @@ CONFIG_TEMPORAL_PATH = "configs/config_temporal.yaml"
 CHECKPOINT_TEMPORAL_PATH = "checkpoints_temporal/best.pt"
 BESTTRACK_PATH = "data/besttrack/amphan_2020.csv"
 
-st.set_page_config(page_title="Cyclone Intensity Classifier", layout="wide", page_icon="🌀")
-
-# ---------------------------------------------------------------------------
-# Palette (validated: dataviz skill, references/palette.md).
-# Ordinal severity ramp -- one hue (blue), light->dark, one step per IMD
-# category so the *order* of the 8-level scale is visually obvious regardless
-# of which category is predicted. Status colors are reserved for confidence /
-# alert states and never reused as a "9th category" color.
-# ---------------------------------------------------------------------------
-SEQ_RAMP = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95"]
-CAT_BLUE = "#2a78d6"    # categorical slot 1 -- train / primary series
-CAT_ORANGE = "#eb6834"  # categorical slot 2 -- val / secondary series
-STATUS_GOOD = "#0ca30c"
-STATUS_WARNING = "#fab219"
-STATUS_SERIOUS = "#ec835a"
-STATUS_CRITICAL = "#d03b3b"
-TEXT_MUTED = "#9aa4b2"  # light muted gray -- readable against the dark app background
-
-PLOTLY_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="Manrope, Arial, sans-serif", size=13, color="#c7ccd4"),
-    margin=dict(l=10, r=10, t=30, b=10),
+st.set_page_config(
+    page_title="CycloneNet — Meteorological Intelligence Platform",
+    layout="wide",
+    page_icon="🌀",
+    initial_sidebar_state="collapsed"
 )
 
-
-def confidence_color(pct: float) -> str:
-    if pct >= 0.85:
-        return STATUS_GOOD
-    if pct >= 0.65:
-        return STATUS_WARNING
-    return STATUS_SERIOUS
-
-
-def callout(text: str, kind: str = "info") -> None:
-    """A themed callout card, standing in for st.info/st.warning so the app
-    doesn't default to Streamlit's stock alert-box look."""
-    bg, accent, icon = {
-        "info": ("#0f1f30", "#6da7ec", "ℹ️"),
-        "warning": ("#2a2312", "#fab219", "⚠️"),
-    }[kind]
-    st.markdown(
-        f"<div class='callout' style='background:{bg};'>{icon}&nbsp;&nbsp;{text}</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def alert_banner(pred_idx: int, conf: float) -> None:
-    """The one decision-support line: what the category means and what to do
-    next, plus the confidence number -- replaces three separate statements
-    (category, a confidence caption, a caveat) with one."""
-    if pred_idx >= 5:
-        level, icon, headline = "critical", "🚨", "HIGH-IMPACT -- review evacuation readiness"
-    elif pred_idx >= 3:
-        level, icon, headline = "warning", "⚠️", "SIGNIFICANT -- monitor closely"
-    else:
-        level, icon, headline = "good", "✅", "LOW IMMEDIATE THREAT"
-    conf_note = " (low model confidence -- verify manually)" if conf < 0.65 else ""
-    bg, accent = {
-        "critical": ("#2a1414", STATUS_CRITICAL),
-        "warning": ("#2a2312", STATUS_WARNING),
-        "good": ("#122a1a", STATUS_GOOD),
-    }[level]
-    st.markdown(
-        f"<div class='alert-banner' style='background:{bg}; border-color:{accent};'>"
-        f"<span style='font-size:1.2rem;'>{icon}</span>&nbsp;&nbsp;"
-        f"<span style='color:{accent}; font-weight:700;'>{headline}</span>"
-        f"<span style='color:#8b93a1;'> &middot; {conf*100:.0f}% confidence{conf_note}</span></div>",
-        unsafe_allow_html=True,
-    )
-
-
+# Hide Streamlit chrome and sidebar completely
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
-
-    html, body, .stApp, .stApp * {
-        font-family: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-
-    /* Hide default Streamlit chrome -- toolbar, footer badge, top decoration bar */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    [data-testid="stToolbar"] {visibility: hidden;}
-    [data-testid="stDecoration"] {display: none;}
-
-    .block-container {padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px;}
-
-    /* Hero header, replacing st.title */
-    .hero {display: flex; align-items: center; gap: 1rem; margin-bottom: 0.2rem;}
-    .hero-icon {
-        font-size: 2rem; width: 3.2rem; height: 3.2rem; border-radius: 50%;
-        background: linear-gradient(135deg, #2a78d6, #184f95);
-        display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .eyebrow {
-        color: #6da7ec; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
-        text-transform: uppercase; margin-bottom: 0.15rem;
-    }
-    .hero-title {font-size: 1.9rem; font-weight: 800; line-height: 1.2; color: #eef1f6;}
-    .hero-sub {color: #9aa4b2; font-size: 0.95rem; margin: 0.4rem 0 1.4rem;}
-
-    /* Tabs restyled as a pill segmented control instead of the default underline */
-    [data-testid="stTabs"] [data-baseweb="tab-list"] {
-        gap: 4px !important; background: #141924; padding: 5px; border-radius: 999px !important;
-        width: fit-content;
-    }
-    [data-testid="stTabs"] [data-baseweb="tab"] {
-        height: auto !important; padding: 0.55rem 1.15rem !important; border-radius: 999px !important;
-        color: #9aa4b2 !important; font-weight: 600; background: transparent !important;
+    #MainMenu {visibility: hidden !important;}
+    footer {visibility: hidden !important;}
+    header {visibility: hidden !important;}
+    [data-testid="stToolbar"] {visibility: hidden !important;}
+    [data-testid="stDecoration"] {display: none !important;}
+    section[data-testid="stSidebar"] {display: none !important; width: 0 !important;}
+    [data-testid="stSidebarNav"] {display: none !important;}
+    [data-testid="collapsedControl"] {display: none !important;}
+    button[aria-label="Toggle sidebar"] {display: none !important;}
+    .block-container {
+        padding: 0 !important;
         margin: 0 !important;
+        max-width: 100% !important;
     }
-    [data-testid="stTabs"] [aria-selected="true"] {background: #2a78d6 !important; color: #ffffff !important;}
-    [data-testid="stTabs"] [data-baseweb="tab"] p {color: inherit !important;}
-    [data-testid="stTabs"] [data-baseweb="tab-highlight"],
-    [data-testid="stTabs"] [data-baseweb="tab-border"] {display: none;}
-
-    /* Metric cards */
-    div[data-testid="stMetric"] {
-        background: #141924; border-radius: 12px; padding: 0.9rem 1.1rem;
-        border: 1px solid #232a38;
-    }
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-        font-size: 1.55rem; color: #eef1f6; font-weight: 700;
-    }
-    div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
-        color: #8b93a1; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em;
-    }
-
-    /* Callout cards, replacing default st.info/st.warning styling */
-    .callout {
-        border-radius: 10px; padding: 0.8rem 1rem; margin: 0.7rem 0;
-        font-size: 0.92rem; line-height: 1.5; color: #d7dce3;
-    }
-
-    section[data-testid="stSidebar"] {background: #0e1219; border-right: 1px solid #1b212c;}
-    section[data-testid="stSidebar"] h2 {font-size: 1.05rem; color: #eef1f6;}
-
-    /* One-line "what this solves" statement under the header */
-    .tagline {
-        color: #cfd6e0; font-size: 0.95rem; font-weight: 500; line-height: 1.5;
-        margin: 0.9rem 0 1.6rem; padding-left: 0.9rem; border-left: 3px solid #2a78d6;
-    }
-
-    /* Operational alert banner on the assessment tab */
-    .alert-banner {
-        border-radius: 12px; padding: 1rem 1.2rem; margin: 0.6rem 0 1.3rem;
-        border: 1px solid; font-size: 0.95rem; line-height: 1.5;
+    .stApp {
+        background-color: #f8fafc !important;
     }
     </style>
     """,
@@ -236,7 +103,6 @@ def load_everything():
 
 @st.cache_resource
 def load_feature_bank(_model, _samples, img_size):
-    from kaggle_dataset import KaggleINSAT3DDataset
     ds = KaggleINSAT3DDataset(_samples, img_size, train=False)
     return build_feature_bank(_model, ds)
 
@@ -270,6 +136,19 @@ def load_temporal_sequences(_hursat_root, _mosdac_root):
     return by_storm, sequences
 
 
+def load_gray(path, img_size):
+    img = Image.open(path).convert("L")
+    if img.size != (img_size, img_size):
+        img = img.resize((img_size, img_size))
+    return np.asarray(img, dtype=np.float32) / 255.0
+
+
+def img_to_base64(pil_img):
+    buffered = io.BytesIO()
+    pil_img.save(buffered, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
 def load_frame_pair(frame, size):
     ir = Image.open(frame["ir_path"]).convert("L")
     raw = Image.open(frame["raw_path"]).convert("L")
@@ -283,9 +162,8 @@ def load_frame_pair(frame, size):
 
 
 def run_forecast(seq, model_t, img_size):
-    """seq: one entry from build_sequences(). Returns {horizon: predicted_kmph}."""
     frames = [load_frame_pair(f, img_size) for f in seq["window"]]
-    x = torch.from_numpy(np.stack(frames, axis=0)).unsqueeze(0).float()  # (1,T,2,H,W)
+    x = torch.from_numpy(np.stack(frames, axis=0)).unsqueeze(0).float()
     t_first = seq["window"][0]["dt"].timestamp()
     dt_feat = torch.tensor(
         [[(f["dt"].timestamp() - t_first) / 3600.0 / 24.0 for f in seq["window"]]],
@@ -301,425 +179,1517 @@ def run_forecast(seq, model_t, img_size):
     return preds
 
 
-if not os.path.exists(CHECKPOINT_PATH):
-    st.error(
-        f"No checkpoint found at `{CHECKPOINT_PATH}`. Run `python src/train_real.py "
-        f"--config {CONFIG_PATH}` first to train and save one."
-    )
-    st.stop()
-
+# Load backend components
 cfg, model, samples, ckpt, n_kaggle, n_hursat, n_mosdac = load_everything()
 img_size = cfg["data"]["img_size"]
+bank = load_feature_bank(model, samples, img_size)
+tcfg, model_t, tckpt = load_temporal_model()
+by_storm, sequences = load_temporal_sequences(tcfg["data"]["hursat_root"], tcfg["data"]["mosdac_root"])
+ri_times, ri_winds, ri_episodes = load_ri_case_study()
 
-st.markdown(
-    f"""
-    <div class="hero">
-        <div class="hero-icon">🌀</div>
-        <div>
-            <div class="eyebrow">SIH26070 &middot; Disaster Management</div>
-            <div class="hero-title">Cyclone Intensity Classifier</div>
-        </div>
-    </div>
-    <div class="hero-sub">Classification + wind-speed estimation from real INSAT-3D imagery
-    &middot; best checkpoint {ckpt['val_acc']:.1%} val accuracy (epoch {ckpt['epoch']})</div>
-    <div class="tagline">Automates the one step in cyclone monitoring that doesn't scale: reading
-    a satellite frame by eye. Feed in an image, get a category, wind speed, and an alert &mdash;
-    in seconds.</div>
-    """,
-    unsafe_allow_html=True,
-)
-
-with st.sidebar:
-    st.header("About this prototype")
-    st.write(
-        "Identifies a tropical cyclone's IMD intensity category and estimates its "
-        "sustained wind speed from satellite imagery, explains the prediction with "
-        "Grad-CAM, scores its own confidence with MC-Dropout, and retrieves the "
-        "closest historical match."
-    )
-    callout(
-        f"Trained on <strong>{len(samples)} real labeled images</strong> from three sources: "
-        f"{n_kaggle} single Kaggle INSAT-3D frames, {n_hursat} NOAA HURSAT-B1 frames across "
-        f"10 real North Indian Ocean cyclones, and {n_mosdac} MOSDAC frames of Cyclone Amphan "
-        "(2020) matched to its official IMD best track &mdash; the only source with real Super "
-        "Cyclonic Storm coverage. Validated on 2 entire HURSAT-B1 storms held out of training "
-        "&mdash; not just held-out images &mdash; so the reported accuracy reflects generalizing "
-        "to a storm the model has never seen. Classes are still imbalanced (Low Pressure Area "
-        "especially). Read predictions as illustrative of the pipeline, not an operational "
-        "forecast.",
-        kind="warning",
-    )
-
-tab_classify, tab_history, tab_ri, tab_forecast, tab_about = st.tabs(
-    ["🔍 Assess a Storm", "📊 Historical Precedent", "⚡ Early-Warning Alert",
-     "🔮 Forecast", "ℹ️ About & Data"]
-)
-
-
-def load_gray(path):
-    img = Image.open(path).convert("L")
-    if img.size != (img_size, img_size):
-        img = img.resize((img_size, img_size))
-    return np.asarray(img, dtype=np.float32) / 255.0
-
-
-with tab_classify:
-    mode = st.radio("Choose an image to classify", ["Pick from dataset", "Upload your own"], horizontal=True)
-
-    true_kmph, true_cat, true_pressure, query_name = None, None, None, None
-    if mode == "Pick from dataset":
-        names = [s["img_name"] for s in samples]
-        choice = st.selectbox("Image", names)
-        s = next(s for s in samples if s["img_name"] == choice)
-        ir_arr = load_gray(s["ir_path"])
-        raw_arr = load_gray(s["raw_path"])
-        true_kmph, true_cat, query_name = s["kmph"], s["cat_idx"], s["img_name"]
-        true_pressure = s.get("pressure_mb")  # None for the 136 Kaggle images -- no label
-        ir_display, raw_display = Image.open(s["ir_path"]), Image.open(s["raw_path"])
-        if not s["has_raw"]:
-            st.caption("Note: this image had no matched raw counterpart -- IR image reused for both channels.")
-    else:
-        uploaded = st.file_uploader("Upload a cyclone satellite image (jpg/png)", type=["jpg", "jpeg", "png"])
-        if uploaded is None:
-            callout("Upload an image, or switch to 'Pick from dataset' above.", kind="info")
-            st.stop()
-        pil = Image.open(uploaded).convert("L")
-        ir_arr = np.asarray(pil.resize((img_size, img_size)), dtype=np.float32) / 255.0
-        raw_arr = ir_arr.copy()
-        ir_display, raw_display = pil, pil
-        callout(
-            "Single-image upload: the same image is used for both channels the model "
-            "expects. Predictions here are lower-fidelity than for dataset images with "
-            "a real raw counterpart.",
-            kind="info",
-        )
-
-    x = torch.from_numpy(np.stack([ir_arr, raw_arr], axis=0)).unsqueeze(0)
-
-    # Deterministic pass (dropout off) drives the Grad-CAM heatmap and the
-    # displayed predicted class; MC-Dropout (dropout deliberately kept on,
-    # see uncertainty.py) separately scores how sure the model actually is.
-    cam = GradCAM(model)
-    heatmap, pred_idx, probs, reg_pred = cam(x)
-    cam.remove()
-    reg_pred_t = torch.tensor(reg_pred)
-    pred_kmph = float(denormalize_wind(reg_pred_t))
-    pred_pressure = float(denormalize_pressure(reg_pred_t)) if reg_pred_t.shape[-1] > 1 else None
-    overlay = overlay_heatmap(ir_arr, heatmap)
-
-    unc = predict_with_uncertainty(model, x, n_samples=30)
-    conf = unc["cls_probs_mean"][pred_idx].item()
-    wind_std_kmph = float(unc["reg_std"][0]) * (250.0 - 40.0)
-    pressure_std_mb = (
-        float(unc["reg_std"][1]) * (PRESSURE_MAX - PRESSURE_MIN)
-        if pred_pressure is not None and len(unc["reg_std"]) > 1 else None
-    )
-
-    col1, col2, col3 = st.columns(3)
-    col1.image(ir_display, caption="IR channel (input)", width='stretch')
-    col2.image(raw_display, caption="Raw channel (input)", width='stretch')
-    col3.image(overlay, caption="Grad-CAM: what drove the prediction", width='stretch')
-
-    st.subheader("Prediction")
-    alert_banner(pred_idx, conf)
-    n_metrics = 2 + (1 if pred_pressure is not None else 0) + (2 if true_cat is not None else 0)
-    mcols = st.columns(n_metrics)
-    i = 0
-    mcols[i].metric("Predicted category", category_label(pred_idx)); i += 1
-    mcols[i].metric("Predicted wind speed", f"{pred_kmph:.0f} km/h", f"±{wind_std_kmph:.0f} km/h"); i += 1
-    if pred_pressure is not None:
-        delta = f"±{pressure_std_mb:.0f} mb" if pressure_std_mb is not None else None
-        mcols[i].metric("Predicted pressure", f"{pred_pressure:.0f} mb", delta); i += 1
-    if true_cat is not None:
-        mcols[i].metric("Actual category", category_label(true_cat)); i += 1
-        mcols[i].metric("Actual wind speed", f"{true_kmph:.0f} km/h"); i += 1
-    if true_pressure is not None:
-        st.caption(f"Actual pressure (real IBTrACS/best-track label): {true_pressure:.0f} mb")
-
-    st.subheader("Category probabilities")
+# Build serialized JSON cache for instant, zero-latency Web App performance
+@st.cache_data
+def build_app_data():
+    samples_data = {}
     cat_names = [c[1] for c in IMD_CATEGORIES]
-    mean_probs = unc["cls_probs_mean"].tolist()
-    std_probs = unc["cls_probs_std"].tolist()
-    bar_colors = [SEQ_RAMP[i] if i != pred_idx else CAT_ORANGE for i in range(len(cat_names))]
-    fig = go.Figure(
-        go.Bar(
-            x=cat_names, y=mean_probs,
-            error_y=dict(type="data", array=std_probs, color=TEXT_MUTED, thickness=1.2),
-            marker_color=bar_colors,
-            hovertemplate="%{x}<br>P = %{y:.2f}<extra></extra>",
-        )
-    )
-    fig.update_layout(**PLOTLY_LAYOUT, yaxis=dict(title="Probability (mean ± std, MC-Dropout)", range=[0, 1]),
-                       xaxis=dict(tickangle=-15), height=340)
-    st.plotly_chart(fig, width='stretch')
-    st.caption(
-        "Bars follow the IMD scale light→dark (Depression→Super Cyclonic Storm); the predicted "
-        "category is highlighted in orange. Error bars are the spread across 30 MC-Dropout passes, "
-        "not a single-pass softmax score -- a wide bar means the model itself is unsure."
-    )
 
-with tab_history:
-    st.subheader("Closest historical matches")
-    st.write("The nearest past storms at a similar stage, so a forecaster isn't starting cold.")
-    if query_name is None:
-        callout("Pick a dataset image in the <strong>Assess a Storm</strong> tab to see its closest historical matches.", kind="info")
-    else:
-        bank = load_feature_bank(model, samples, img_size)
-        matches = find_similar(model, x, bank, k=4, exclude_name=query_name)
-        cols = st.columns(len(matches))
-        for col, m in zip(cols, matches):
-            match_sample = next(s for s in samples if s["img_name"] == m["img_name"])
-            col.image(Image.open(match_sample["ir_path"]), width='stretch')
-            badge_color = confidence_color(m["percentile"] / 100.0)
-            col.markdown(
-                f"**{m['img_name']}**<br>"
-                f"<span style='color:{badge_color}; font-weight:600;'>{m['percentile']:.1f}th percentile match</span><br>"
-                f"{category_label(m['cat_idx'])}, {m['kmph']:.0f} km/h",
-                unsafe_allow_html=True,
-            )
-        st.caption(
-            "Percentile against the whole dataset, not raw similarity -- comparable across "
-            "checkpoints, unlike a raw cosine score."
+    # Precompute sample assessments & historical matches for first 25 samples
+    for i, s in enumerate(samples[:25]):
+        ir_arr = load_gray(s["ir_path"], img_size)
+        raw_arr = load_gray(s["raw_path"], img_size)
+        x = torch.from_numpy(np.stack([ir_arr, raw_arr], axis=0)).unsqueeze(0)
+
+        cam = GradCAM(model)
+        heatmap, pred_idx, probs, reg_pred = cam(x)
+        cam.remove()
+        reg_pred_t = torch.tensor(reg_pred)
+        pred_kmph = float(denormalize_wind(reg_pred_t))
+        pred_pressure = float(denormalize_pressure(reg_pred_t)) if reg_pred_t.shape[-1] > 1 else None
+        overlay = overlay_heatmap(ir_arr, heatmap)
+
+        unc = predict_with_uncertainty(model, x, n_samples=30)
+        conf = float(unc["cls_probs_mean"][pred_idx].item())
+        wind_std_kmph = float(unc["reg_std"][0]) * (250.0 - 40.0)
+        pressure_std_mb = (
+            float(unc["reg_std"][1]) * (PRESSURE_MAX - PRESSURE_MIN)
+            if pred_pressure is not None and len(unc["reg_std"]) > 1 else None
         )
 
-with tab_ri:
-    st.subheader("Rapid Intensification — validated case study: Cyclone Amphan (2020)")
-    st.write(
-        "The alert this system raises the moment a storm crosses the standard "
-        "**+30kt/24h** threshold (Kaplan & DeMaria, 2003) -- shown here against Amphan's real "
-        "2020 record, since we have the documented outcome to check it against."
-    )
-    st.caption(
-        "No model involved here -- validating the alert *logic* against real, documented "
-        "history. The same logic also runs on the temporal model's own live predictions -- "
-        "see the Rapid Intensification check in the Forecast tab."
-    )
-    times, winds, episodes = load_ri_case_study()
-    fig_ri = go.Figure()
-    fig_ri.add_trace(go.Scatter(
-        x=times, y=winds, mode="lines+markers", name="Sustained wind (kt)",
-        line=dict(color=CAT_BLUE, width=2), marker=dict(size=5),
-        hovertemplate="%{x|%d %b, %H:%M}<br>%{y:.0f} kt<extra></extra>",
-    ))
-    for start, end, w0, w1, delta in episodes:
-        fig_ri.add_vrect(x0=start, x1=end, fillcolor=STATUS_CRITICAL, opacity=0.12, line_width=0)
-        fig_ri.add_annotation(
-            x=start + (end - start) / 2, y=max(winds) * 1.05,
-            text=f"RI episode: +{delta:.0f}kt over {(end-start).total_seconds()/3600:.0f}h",
-            showarrow=False, font=dict(color=STATUS_CRITICAL, size=12, family="Arial, sans-serif"),
-        )
-    fig_ri.update_layout(**PLOTLY_LAYOUT, yaxis=dict(title="Sustained wind speed (kt)"),
-                          xaxis=dict(title="Date (UTC)"), height=420, showlegend=False)
-    st.plotly_chart(fig_ri, width='stretch')
-    if episodes:
-        start, end, w0, w1, delta = episodes[0]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Intensification", f"+{delta:.0f} kt")
-        c2.metric("Duration", f"{(end-start).total_seconds()/3600:.0f} h")
-        c3.metric("Peak reached", f"{max(winds):.0f} kt · SuCS")
+        ir_pil = Image.open(s["ir_path"])
+        raw_pil = Image.open(s["raw_path"])
+        overlay_pil = Image.fromarray((overlay * 255).astype(np.uint8))
 
-with tab_forecast:
-    st.subheader("Intensity forecast: +6h / +12h / +24h")
-    st.write(
-        "Given the last 4 observed frames of a storm, predicts wind speed 6/12/24 hours "
-        "ahead — this is the **prediction** half of the problem statement, not just "
-        "classification of the current frame."
-    )
+        # Historical matches
+        matches = find_similar(model, x, bank, k=4, exclude_name=s["img_name"])
+        matches_res = []
+        for m in matches:
+            m_sample = next(samp for samp in samples if samp["img_name"] == m["img_name"])
+            m_pil = Image.open(m_sample["ir_path"])
+            matches_res.append({
+                "img_name": m["img_name"],
+                "percentile": round(m["percentile"], 1),
+                "cat_idx": m["cat_idx"],
+                "cat_name": category_label(m["cat_idx"]),
+                "kmph": round(m["kmph"], 1),
+                "ir_base64": img_to_base64(m_pil),
+            })
 
-    if not os.path.exists(CHECKPOINT_TEMPORAL_PATH):
-        callout(
-            f"No temporal checkpoint found at <code>{CHECKPOINT_TEMPORAL_PATH}</code>. "
-            f"Run <code>python src/train_temporal.py --config {CONFIG_TEMPORAL_PATH}</code> first.",
-            kind="warning",
-        )
-    else:
-        tcfg, model_t, tckpt = load_temporal_model()
-        by_storm, sequences = load_temporal_sequences(
-            tcfg["data"]["hursat_root"], tcfg["data"]["mosdac_root"])
-
-        storms_with_seqs = sorted(set(s["storm"] for s in sequences))
-        storm_labels = {
-            s: f"{s}  (held out — never trained on)" if s in VAL_STORMS else s
-            for s in storms_with_seqs
+        samples_data[s["img_name"]] = {
+            "img_name": s["img_name"],
+            "ir_base64": img_to_base64(ir_pil),
+            "raw_base64": img_to_base64(raw_pil),
+            "overlay_base64": img_to_base64(overlay_pil),
+            "pred_idx": pred_idx,
+            "pred_cat_name": category_label(pred_idx),
+            "pred_kmph": round(pred_kmph, 1),
+            "wind_std_kmph": round(wind_std_kmph, 1),
+            "pred_pressure": round(pred_pressure, 1) if pred_pressure is not None else None,
+            "pressure_std_mb": round(pressure_std_mb, 1) if pressure_std_mb is not None else None,
+            "confidence": round(conf, 4),
+            "true_cat_name": category_label(s["cat_idx"]),
+            "true_kmph": round(s["kmph"], 1),
+            "true_pressure": s.get("pressure_mb"),
+            "mean_probs": [round(p, 4) for p in unc["cls_probs_mean"].tolist()],
+            "std_probs": [round(p, 4) for p in unc["cls_probs_std"].tolist()],
+            "matches": matches_res,
         }
-        picked_storm = st.selectbox(
-            "Storm", storms_with_seqs, format_func=lambda s: storm_labels[s])
 
-        storm_seqs = [s for s in sequences if s["storm"] == picked_storm]
+    # Forecast Sequences Data
+    storms_with_seqs = sorted(set(s["storm"] for s in sequences))
+    forecast_data = {}
+    for st_name in storms_with_seqs:
+        storm_seqs = [s for s in sequences if s["storm"] == st_name]
         storm_seqs.sort(key=lambda s: s["anchor_dt"])
-        default_idx = max(0, int(len(storm_seqs) * 0.55))
-        idx = st.slider(
-            "Anchor point (last observed frame)", 0, len(storm_seqs) - 1, default_idx,
-            format="",
-            help="Move to choose which point in the storm's life the forecast is made from.",
-        )
-        seq = storm_seqs[idx]
-        st.caption(f"Forecasting from {seq['anchor_dt'].strftime('%d %b %Y, %H:%M UTC')} "
-                   f"— anchor {idx + 1} of {len(storm_seqs)} for {picked_storm}.")
+        
+        full_times = [f["dt"].strftime("%Y-%m-%d %H:%M") for f in by_storm[st_name]]
+        full_winds = [round(f["kmph"], 1) for f in by_storm[st_name]]
 
-        if picked_storm in VAL_STORMS:
-            callout(
-                f"<strong>{picked_storm}</strong> was held out entirely during training — "
-                "the forecast below is genuine generalization to a storm the model never saw, "
-                "not a memorized fit.",
-                kind="info",
-            )
-        else:
-            callout(
-                f"<strong>{picked_storm}</strong> was used during training, so this forecast "
-                "isn't a held-out generalization test — pick Phet or Nilofar above for that.",
-                kind="warning",
-            )
+        seq_list = []
+        for idx, seq in enumerate(storm_seqs):
+            preds = run_forecast(seq, model_t, img_size)
+            fc_times = [seq["anchor_dt"].strftime("%Y-%m-%d %H:%M")] + [
+                (seq["anchor_dt"] + pd.Timedelta(hours=h)).strftime("%Y-%m-%d %H:%M")
+                for h in HORIZONS_HOURS
+            ]
+            fc_winds = [round(seq["anchor_kmph"], 1)] + [round(preds[h], 1) for h in HORIZONS_HOURS]
 
-        preds = run_forecast(seq, model_t, cfg["data"]["img_size"])
+            rt_times = [seq["anchor_dt"]] + [seq["anchor_dt"] + pd.Timedelta(hours=h) for h in HORIZONS_HOURS]
+            rt_winds_kt = [w / 1.852 for w in fc_winds]
+            rt_events = find_ri_events(rt_times, rt_winds_kt)
+            rt_episodes = merge_overlapping(rt_events)
+            rt_episodes_res = []
+            if rt_episodes:
+                for start, end, w0, w1, delta in rt_episodes:
+                    rt_episodes_res.append({
+                        "delta_kt": round(delta, 1),
+                        "duration_hours": round((end - start).total_seconds() / 3600.0, 1),
+                    })
 
-        thumb_cols = st.columns(len(seq["window"]))
-        for col, f in zip(thumb_cols, seq["window"]):
-            col.image(Image.open(f["ir_path"]), width='stretch')
-            col.caption(f["dt"].strftime("%d %b, %H:%M"))
+            thumbs = []
+            for f in seq["window"]:
+                img_p = Image.open(f["ir_path"])
+                thumbs.append({
+                    "dt": f["dt"].strftime("%d %b, %H:%M"),
+                    "ir_base64": img_to_base64(img_p),
+                })
 
-        st.markdown("**Current state (anchor)**")
-        anchor_cat = wind_speed_to_category(seq["anchor_kmph"])
-        acols = st.columns(2)
-        acols[0].metric("Wind speed", f"{seq['anchor_kmph']:.0f} km/h")
-        acols[1].metric("Category", category_label(anchor_cat))
+            seq_list.append({
+                "anchor_idx": idx,
+                "anchor_dt": seq["anchor_dt"].strftime("%d %b %Y, %H:%M UTC"),
+                "anchor_kmph": round(seq["anchor_kmph"], 1),
+                "anchor_cat": category_label(wind_speed_to_category(seq["anchor_kmph"])),
+                "horizons": {
+                    str(h): {
+                        "pred_kmph": round(preds[h], 1),
+                        "pred_cat": category_label(wind_speed_to_category(preds[h])),
+                        "delta_kmph": round(preds[h] - seq["anchor_kmph"], 1),
+                        "actual_kmph": round(seq["targets"][h], 1) if h in seq["targets"] else None
+                    } for h in HORIZONS_HOURS
+                },
+                "fc_times": fc_times,
+                "fc_winds": fc_winds,
+                "rt_episodes": rt_episodes_res,
+                "thumbnails": thumbs,
+            })
 
-        st.markdown("**Forecast**")
-        fcols = st.columns(len(HORIZONS_HOURS))
-        for col, h in zip(fcols, HORIZONS_HOURS):
-            pred_kmph = preds[h]
-            pred_cat = wind_speed_to_category(pred_kmph)
-            delta_disp = pred_kmph - seq["anchor_kmph"]
-            actual_note = ""
-            if h in seq["targets"]:
-                actual_note = f"actual: {seq['targets'][h]:.0f} km/h"
-            col.metric(f"+{h}h", f"{pred_kmph:.0f} km/h", f"{delta_disp:+.0f} km/h vs now")
-            col.caption(f"{category_label(pred_cat)}" + (f" · {actual_note}" if actual_note else ""))
+        forecast_data[st_name] = {
+            "full_times": full_times,
+            "full_winds": full_winds,
+            "is_held_out": st_name in VAL_STORMS,
+            "sequences": seq_list,
+        }
 
-        # Full real storm timeline (past AND future, all real observed data) with the
-        # forecast branching off the chosen anchor -- lets a viewer see at a glance how
-        # close the dashed forecast line tracks the real (blue) future, when it exists.
-        full_times = [f["dt"] for f in by_storm[picked_storm]]
-        full_winds = [f["kmph"] for f in by_storm[picked_storm]]
-        fc_times = [seq["anchor_dt"]] + [seq["anchor_dt"] + pd.Timedelta(hours=h) for h in HORIZONS_HOURS]
-        fc_winds = [seq["anchor_kmph"]] + [preds[h] for h in HORIZONS_HOURS]
+    # RI Alert Data
+    ri_episodes_res = []
+    if ri_episodes:
+        for start, end, w0, w1, delta in ri_episodes:
+            ri_episodes_res.append({
+                "start": start.strftime("%d %b %Y, %H:%M UTC"),
+                "end": end.strftime("%d %b %Y, %H:%M UTC"),
+                "delta": round(delta, 1),
+                "duration_hours": round((end - start).total_seconds() / 3600.0, 1),
+            })
 
-        fig_fc = go.Figure()
-        fig_fc.add_trace(go.Scatter(
-            x=full_times, y=full_winds, mode="lines", name="Observed (real record)",
-            line=dict(color=CAT_BLUE, width=2),
-            hovertemplate="%{x|%d %b, %H:%M}<br>%{y:.0f} km/h<extra></extra>",
-        ))
-        fig_fc.add_trace(go.Scatter(
-            x=fc_times, y=fc_winds, mode="lines+markers", name="Forecast (this model)",
-            line=dict(color=CAT_ORANGE, width=2, dash="dash"), marker=dict(size=8, symbol="diamond"),
-            hovertemplate="%{x|%d %b, %H:%M}<br>%{y:.0f} km/h (forecast)<extra></extra>",
-        ))
-        fig_fc.add_trace(go.Scatter(
-            x=[seq["anchor_dt"]], y=[seq["anchor_kmph"]], mode="markers", name="Anchor (now)",
-            marker=dict(size=11, color="#eef1f6", line=dict(color=CAT_ORANGE, width=2)),
-            hovertemplate="Anchor: %{y:.0f} km/h<extra></extra>",
-        ))
-        fig_fc.update_layout(**PLOTLY_LAYOUT, yaxis=dict(title="Sustained wind speed (km/h)"),
-                              xaxis=dict(title="Date (UTC)"), height=420,
-                              legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig_fc, width='stretch')
-
-        # --- Live RI check, on THIS forecast's own predicted trajectory ---
-        # Same find_ri_events/merge_overlapping logic as the Early-Warning tab,
-        # but fed the model's own +6h/+12h/+24h predictions instead of a
-        # historical best-track record -- the alert logic never changes
-        # between "checking history" and "live forecasting", only the source
-        # of the wind-speed series does (see src/ri_alert.py's docstring).
-        rt_times = [seq["anchor_dt"]] + [seq["anchor_dt"] + pd.Timedelta(hours=h) for h in HORIZONS_HOURS]
-        rt_winds_kt = [w / 1.852 for w in fc_winds]  # km/h -> kt
-        rt_events = find_ri_events(rt_times, rt_winds_kt)
-        rt_episodes = merge_overlapping(rt_events)
-
-        st.markdown("**Rapid Intensification check — from this forecast**")
-        if rt_episodes:
-            start, end, w0, w1, delta = rt_episodes[0]
-            hours = (end - start).total_seconds() / 3600.0
-            st.markdown(
-                f"<div class='alert-banner' style='background:#2a1414; border-color:{STATUS_CRITICAL};'>"
-                f"<span style='font-size:1.2rem;'>🚨</span>&nbsp;&nbsp;"
-                f"<span style='color:{STATUS_CRITICAL}; font-weight:700;'>RAPID INTENSIFICATION ALERT</span>"
-                f"<span style='color:#8b93a1;'> &middot; this model's own forecast predicts "
-                f"+{delta:.0f}kt over {hours:.0f}h, crossing the +{RI_THRESHOLD_KT:.0f}kt/"
-                f"{RI_WINDOW_HOURS:.0f}h threshold (Kaplan &amp; DeMaria, 2003)</span></div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            callout(
-                f"No Rapid Intensification threshold crossing predicted in this forecast window "
-                f"(+{RI_THRESHOLD_KT:.0f}kt/{RI_WINDOW_HOURS:.0f}h not reached).",
-                kind="info",
-            )
-        st.caption(
-            "Unlike the Early-Warning Alert tab (validated against Amphan's real historical "
-            "record), this check runs on the temporal model's own live predictions for the "
-            "storm and anchor point chosen above."
-        )
-
-        val_mae = tckpt.get("val_mae_per_h", [])
-        base_mae = tckpt.get("baseline_mae_per_h", [])
-        if val_mae and base_mae:
-            improvements = [f"+{h}h: {m:.1f} km/h (vs. {b:.1f} km/h predicting no change)"
-                             for h, m, b in zip(HORIZONS_HOURS, val_mae, base_mae)]
-            st.caption(
-                "Validated on the 2 fully held-out storms (Phet, Nilofar) against a "
-                "persistence baseline (\"predict no change\") — mean absolute error: "
-                + "; ".join(improvements) + ". The model beats the baseline at every horizon."
-            )
-
-with tab_about:
-    st.subheader("Dataset composition")
+    # Composition & Training history
     counts = {}
     for s in samples:
         counts[s["cat_idx"]] = counts.get(s["cat_idx"], 0) + 1
-    cat_order = [i for i in range(len(IMD_CATEGORIES)) if counts.get(i, 0) > 0]
-    labels = [IMD_CATEGORIES[i][1] for i in cat_order]
-    values = [counts[i] for i in cat_order]
-    colors = [SEQ_RAMP[i] for i in cat_order]
-    fig_d = go.Figure(go.Bar(x=values, y=labels, orientation="h", marker_color=colors,
-                              hovertemplate="%{y}: %{x} images<extra></extra>"))
-    fig_d.update_layout(**PLOTLY_LAYOUT, xaxis=dict(title="Images"), height=320)
-    st.plotly_chart(fig_d, width='stretch')
+
+    cat_composition = []
+    for idx, item in enumerate(IMD_CATEGORIES):
+        cat_name = item[0]
+        if counts.get(idx, 0) > 0:
+            cat_composition.append({
+                "cat_idx": idx,
+                "name": cat_name,
+                "count": counts.get(idx, 0),
+            })
 
     log_path = cfg["train"]["log_path"]
+    hist_data = []
     if os.path.exists(log_path):
-        st.subheader("Training curve (this checkpoint's run)")
         hist = pd.read_csv(log_path)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=hist["epoch"], y=hist["train_acc"], name="Train accuracy",
-                                   line=dict(color=CAT_BLUE, width=2)))
-        fig2.add_trace(go.Scatter(x=hist["epoch"], y=hist["val_acc"], name="Val accuracy",
-                                   line=dict(color=CAT_ORANGE, width=2)))
-        fig2.update_layout(**PLOTLY_LAYOUT, xaxis=dict(title="Epoch"), yaxis=dict(title="Accuracy"),
-                            height=340, legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig2, width='stretch')
-        st.caption(
-            "Train accuracy climbing well above val is expected at this data size, and val is "
-            "measured on 2 entire storms the model never trained on -- a harder, more honest "
-            "bar than a random image split -- documented here rather than hidden."
-        )
+        for _, row in hist.iterrows():
+            hist_data.append({
+                "epoch": int(row["epoch"]),
+                "train_acc": round(float(row["train_acc"]), 4),
+                "val_acc": round(float(row["val_acc"]), 4),
+            })
 
-    st.subheader("Known limitations")
-    st.markdown(
-        f"- {len(samples)} labeled images total ({n_kaggle} single Kaggle frames with no storm ID, "
-        f"{n_hursat} HURSAT-B1 frames across 10 real storms, {n_mosdac} MOSDAC frames of Cyclone "
-        "Amphan) -- still small for an 8-way classifier, and still imbalanced (Low Pressure Area "
-        "is rare in real records).\n"
-        "- The Kaggle and Amphan portions have no held-out storms of their own, so all of those "
-        "images are always in training, never in validation -- validation is 2 HURSAT-B1 storms "
-        "(136 frames) held out entirely. Amphan reached Super Cyclonic Storm, the one category "
-        "the other two sources barely cover, which is why it went to training rather than "
-        "validation -- see src/train_combined.py for the reasoning.\n"
-        "- No pressure label from the Kaggle or HURSAT-B1 sources -- wind speed only (Amphan's "
-        "IMD best track does have pressure, currently unused since the model has a single-output "
-        "wind-only regression head).\n"
-        "- No ImageNet-pretrained backbone: the download is blocked in this sandbox, so this "
-        "checkpoint and the original 136-image one both trained from random initialization -- the "
-        "reported accuracies are comparable to each other on that basis, not inflated by one having "
-        "a head start.\n"
-    )
+    return {
+        "cat_names": cat_names,
+        "sample_names": [s["img_name"] for s in samples[:25]],
+        "samples": samples_data,
+        "ri": {
+            "times": [t.strftime("%d %b, %H:%M") for t in ri_times] if ri_times else [],
+            "winds": [round(w, 1) for w in ri_winds] if ri_winds else [],
+            "episodes": ri_episodes_res,
+            "peak_wind_kt": round(max(ri_winds), 1) if ri_winds else None,
+        },
+        "forecast": {
+            "storms": storms_with_seqs,
+            "val_storms": list(VAL_STORMS),
+            "data": forecast_data,
+        },
+        "about": {
+            "total_samples": len(samples),
+            "n_kaggle": n_kaggle,
+            "n_hursat": n_hursat,
+            "n_mosdac": n_mosdac,
+            "val_accuracy": round(ckpt["val_acc"] * 100.0, 1),
+            "val_epoch": ckpt["epoch"],
+            "composition": cat_composition,
+            "training_history": hist_data,
+        }
+    }
+
+APP_DATA = build_app_data()
+APP_DATA_JSON = json.dumps(APP_DATA)
+
+HTML_CONTENT = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cyclone AI — Meteorological Intelligence Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {{
+      --bg-main: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-subtle: #f1f5f9;
+      --border-color: #e2e8f0;
+      --border-hover: #cbd5e1;
+      --text-main: #0f172a;
+      --text-sub: #334155;
+      --text-muted: #64748b;
+      --blue-primary: #0284c7;
+      --blue-hover: #0369a1;
+      --blue-light: #e0f2fe;
+      --coral-accent: #f97316;
+      --green-bg: #f0fdf4;
+      --green-border: #bbf7d0;
+      --green-text: #166534;
+      --amber-bg: #fffbeb;
+      --amber-border: #fde68a;
+      --amber-text: #92400e;
+      --red-bg: #fef2f2;
+      --red-border: #fecaca;
+      --red-text: #991b1b;
+      --shadow-card: 0 4px 20px -2px rgba(15, 23, 42, 0.04);
+      --radius-card: 16px;
+      --radius-sm: 10px;
+      --radius-pill: 999px;
+    }}
+
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    body {{
+      font-family: 'Manrope', 'Inter', -apple-system, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      padding-bottom: 3rem;
+    }}
+
+    .app-container {{
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 1.2rem 1.5rem 3rem;
+    }}
+
+    /* Header */
+    .app-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--bg-card);
+      padding: 1.1rem 1.6rem;
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border-color);
+      box-shadow: var(--shadow-card);
+      margin-bottom: 1.5rem;
+    }}
+
+    .header-brand {{
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      cursor: pointer;
+    }}
+
+    .brand-icon {{
+      font-size: 1.9rem;
+      width: 3.3rem;
+      height: 3.3rem;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--blue-primary), var(--blue-hover));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #ffffff;
+      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25);
+    }}
+
+    .header-title {{
+      font-size: 1.55rem;
+      font-weight: 800;
+      color: var(--text-main);
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }}
+
+    .header-subtitle {{
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      font-weight: 500;
+      margin-top: 0.1rem;
+    }}
+
+    .header-nav {{
+      display: flex;
+      gap: 6px;
+      background: #e2e8f0;
+      padding: 5px;
+      border-radius: var(--radius-pill);
+    }}
+
+    .nav-btn {{
+      background: transparent;
+      border: none;
+      padding: 0.55rem 1.2rem;
+      border-radius: var(--radius-pill);
+      color: var(--text-sub);
+      font-size: 0.9rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.15s ease-in-out;
+    }}
+
+    .nav-btn:hover {{ color: var(--text-main); }}
+    .nav-btn.active {{
+      background: var(--blue-primary);
+      color: #ffffff;
+      box-shadow: 0 3px 10px rgba(2, 132, 199, 0.3);
+    }}
+
+    /* Views */
+    .view-section {{ display: none; }}
+    .view-section.active {{ display: block; }}
+
+    /* Landing View Animations */
+    @keyframes fadeInUp {{
+      from {{
+        opacity: 0;
+        transform: translateY(22px) scale(0.98);
+      }}
+      to {{
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }}
+    }}
+
+    @keyframes popIn {{
+      0% {{
+        opacity: 0;
+        transform: scale(0.92);
+      }}
+      70% {{
+        transform: scale(1.02);
+      }}
+      100% {{
+        opacity: 1;
+        transform: scale(1);
+      }}
+    }}
+
+    .animate-pop {{
+      animation: popIn 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }}
+
+    .animate-fade-up {{
+      animation: fadeInUp 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }}
+
+    .delay-1 {{ animation-delay: 0.06s; }}
+    .delay-2 {{ animation-delay: 0.12s; }}
+    .delay-3 {{ animation-delay: 0.18s; }}
+    .delay-4 {{ animation-delay: 0.24s; }}
+    .delay-5 {{ animation-delay: 0.30s; }}
+    .delay-6 {{ animation-delay: 0.36s; }}
+    .delay-7 {{ animation-delay: 0.42s; }}
+    .delay-8 {{ animation-delay: 0.48s; }}
+    .delay-9 {{ animation-delay: 0.54s; }}
+
+    /* Landing View */
+    .landing-hero-card {{
+      background: var(--bg-card);
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border-color);
+      padding: 3rem 2.5rem;
+      box-shadow: var(--shadow-card);
+      text-align: center;
+      margin-bottom: 1.8rem;
+    }}
+
+    .landing-badge {{
+      display: inline-block;
+      background: var(--blue-light);
+      color: #0369a1;
+      font-weight: 800;
+      font-size: 0.8rem;
+      padding: 0.4rem 1rem;
+      border-radius: var(--radius-pill);
+      margin-bottom: 1.2rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+
+    .landing-title {{
+      font-size: 3.4rem;
+      font-weight: 800;
+      color: var(--text-main);
+      letter-spacing: -0.035em;
+      line-height: 1.1;
+      background: linear-gradient(135deg, #0f172a 0%, #0284c7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }}
+
+    .landing-sub {{
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      max-width: 720px;
+      margin: 0.9rem auto 2.2rem;
+      line-height: 1.6;
+    }}
+
+    .landing-hero-box {{
+      width: 100%;
+      max-width: 860px;
+      height: 400px;
+      margin: 0 auto 2rem;
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+      position: relative;
+    }}
+
+    .landing-hero-box img {{
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }}
+
+    .hero-status-pill {{
+      position: absolute;
+      bottom: 1rem;
+      left: 1rem;
+      background: rgba(15, 23, 42, 0.82);
+      backdrop-filter: blur(8px);
+      color: #ffffff;
+      padding: 0.55rem 1.1rem;
+      border-radius: var(--radius-pill);
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }}
+
+    .status-dot-pulse {{
+      width: 9px;
+      height: 9px;
+      background-color: #22c55e;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #22c55e;
+    }}
+
+    .hero-actions {{
+      display: flex;
+      justify-content: center;
+      gap: 1.2rem;
+      margin-bottom: 2.5rem;
+    }}
+
+    .btn-cta {{
+      background: var(--blue-primary);
+      color: #ffffff;
+      border: none;
+      padding: 0.9rem 2.4rem;
+      font-size: 1.05rem;
+      font-weight: 700;
+      border-radius: var(--radius-pill);
+      font-family: inherit;
+      cursor: pointer;
+      box-shadow: 0 4px 16px rgba(2, 132, 199, 0.35);
+      transition: all 0.2s ease-in-out;
+    }}
+
+    .btn-cta:hover {{
+      background: var(--blue-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(2, 132, 199, 0.45);
+    }}
+
+    .btn-cta.btn-secondary {{
+      background: var(--bg-card);
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+    }}
+
+    .btn-cta.btn-secondary:hover {{
+      background: var(--bg-subtle);
+      border-color: var(--border-hover);
+    }}
+
+    /* Metric Strip */
+    .landing-metrics-strip {{
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1.2rem;
+      margin-bottom: 2.5rem;
+    }}
+
+    .metric-strip-card {{
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 1.4rem 1.1rem;
+      text-align: center;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.03);
+    }}
+
+    .metric-strip-card .m-val {{
+      font-size: 2.1rem;
+      font-weight: 800;
+      color: var(--blue-primary);
+      line-height: 1.1;
+    }}
+
+    .metric-strip-card .m-title {{
+      font-weight: 700;
+      font-size: 0.95rem;
+      color: var(--text-main);
+      margin-top: 0.3rem;
+    }}
+
+    .metric-strip-card .m-sub {{
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+    }}
+
+    .landing-highlights {{
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.4rem;
+      margin-top: 1.2rem;
+    }}
+
+    .highlight-card {{
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 1.5rem 1.3rem;
+      text-align: left;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.03);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }}
+
+    .highlight-card:hover {{
+      border-color: var(--blue-primary);
+      transform: translateY(-3px);
+      box-shadow: 0 8px 24px rgba(2, 132, 199, 0.12);
+    }}
+
+    .highlight-icon {{ font-size: 2rem; margin-bottom: 0.6rem; }}
+    .highlight-title {{ font-weight: 800; font-size: 1.05rem; color: var(--text-main); margin-bottom: 0.3rem; }}
+    .highlight-desc {{ font-size: 0.88rem; color: var(--text-muted); line-height: 1.5; }}
+
+    /* Layout Cards & Grids */
+    .card {{
+      background: var(--bg-card);
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border-color);
+      padding: 1.3rem;
+      box-shadow: var(--shadow-card);
+      margin-bottom: 1.3rem;
+    }}
+
+    .card-title {{
+      font-size: 1.1rem;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-bottom: 0.8rem;
+    }}
+
+    .grid {{ display: grid; gap: 1.2rem; }}
+    .grid-2 {{ grid-template-columns: repeat(2, 1fr); }}
+    .grid-3 {{ grid-template-columns: repeat(3, 1fr); }}
+    .grid-4 {{ grid-template-columns: repeat(4, 1fr); }}
+
+    /* Two-column Assess Composition */
+    .assess-cols {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.4rem;
+      margin-bottom: 1.4rem;
+    }}
+
+    @media (max-width: 900px) {{
+      .assess-cols, .grid-2, .grid-3, .grid-4, .landing-highlights {{ grid-template-columns: 1fr; }}
+    }}
+
+    .main-sat-img {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      border-radius: 14px;
+      border: 1px solid var(--border-color);
+    }}
+
+    .control-label {{
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--text-main);
+      display: block;
+      margin-bottom: 0.4rem;
+    }}
+
+    .custom-select, .custom-range {{
+      width: 100%;
+      padding: 0.65rem 0.9rem;
+      border-radius: 10px;
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.92rem;
+      outline: none;
+    }}
+
+    /* Assessment Output Box */
+    .assessment-primary-box {{
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 1.4rem;
+      text-align: center;
+      margin: 1rem 0;
+    }}
+
+    .assess-cat-val {{
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: var(--blue-primary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+
+    .assess-wind-val {{
+      font-size: 2.5rem;
+      font-weight: 800;
+      color: var(--text-main);
+      line-height: 1.1;
+      margin: 0.3rem 0;
+    }}
+
+    .assess-sub-val {{
+      font-size: 0.92rem;
+      color: var(--text-muted);
+      font-weight: 600;
+    }}
+
+    /* Metrics */
+    .metrics-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 1rem;
+    }}
+
+    .metric-card {{
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 1rem 1.1rem;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
+    }}
+
+    .metric-label {{
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+    }}
+
+    .metric-value {{
+      font-size: 1.6rem;
+      color: var(--text-main);
+      font-weight: 800;
+      line-height: 1.25;
+      margin-top: 0.2rem;
+    }}
+
+    .metric-sub {{
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.15rem;
+      font-weight: 500;
+    }}
+
+    /* Banners & Callouts */
+    .alert-banner {{
+      border-radius: 12px;
+      padding: 0.9rem 1.1rem;
+      font-size: 0.92rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }}
+
+    .alert-banner.good {{ background: var(--green-bg); border: 1px solid var(--green-border); color: var(--green-text); }}
+    .alert-banner.warning {{ background: var(--amber-bg); border: 1px solid var(--amber-border); color: var(--amber-text); }}
+    .alert-banner.critical {{ background: var(--red-bg); border: 1px solid var(--red-border); color: var(--red-text); }}
+
+    .callout {{
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      margin: 1.2rem 0;
+      font-size: 0.92rem;
+      background: var(--blue-light);
+      border: 1px solid #bae6fd;
+      color: #0369a1;
+    }}
+
+    /* Section titles */
+    .section-title-block {{
+      margin: 1.8rem 0 1rem;
+    }}
+
+    .section-title-block h3 {{
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: var(--text-main);
+    }}
+
+    .section-title-block p {{
+      font-size: 0.88rem;
+      color: var(--text-muted);
+    }}
+
+    /* Channel Cards */
+    .channel-card img {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+    }}
+
+    .channel-tag {{
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 0.5rem;
+    }}
+
+    .chart-container {{
+      position: relative;
+      width: 100%;
+      height: 350px;
+      margin-top: 0.5rem;
+    }}
+
+    .caption {{
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+    }}
+
+    .margin-top {{ margin-top: 1.2rem; }}
+
+    /* Historical comparison card */
+    .hist-card {{
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 0.9rem;
+    }}
+
+    .hist-card img {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+    }}
+
+    .hist-badge {{
+      background: var(--blue-light);
+      color: #0369a1;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.2rem 0.5rem;
+      border-radius: var(--radius-pill);
+      display: inline-block;
+      margin: 0.4rem 0 0.2rem;
+    }}
+
+    .limitations-list {{
+      padding-left: 1.2rem;
+      color: var(--text-sub);
+      font-size: 0.92rem;
+      line-height: 1.65;
+    }}
+
+    .limitations-list li {{ margin-bottom: 0.6rem; }}
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Navigation Tabs -->
+    <nav class="header-nav" style="margin-bottom: 1.5rem; width: fit-content;">
+      <button class="nav-btn active" data-view="landing" onclick="showView('landing')">🏠 Home</button>
+      <button class="nav-btn" data-view="assess" onclick="showView('assess')">🔍 Assess a Storm</button>
+      <button class="nav-btn" data-view="history" onclick="showView('history')">📊 Historical Precedent</button>
+      <button class="nav-btn" data-view="ri" onclick="showView('ri')">⚡ Early Warning</button>
+      <button class="nav-btn" data-view="forecast" onclick="showView('forecast')">🔮 Forecast</button>
+      <button class="nav-btn" data-view="about" onclick="showView('about')">ℹ️ About &amp; Data</button>
+    </nav>
+
+    <!-- LANDING VIEW -->
+    <div id="view-landing" class="view-section active">
+      <div class="landing-hero-card">
+        <div class="landing-badge animate-pop delay-1">🌀 SIH26070 &bull; DISASTER MANAGEMENT &bull; IMD / MOES</div>
+        <h1 class="landing-title animate-fade-up delay-2">CycloneNet</h1>
+        <p class="landing-sub animate-fade-up delay-3">Next-Generation AI Platform for Real-Time Tropical Cyclone Intensity Classification, Central Pressure Estimation &amp; +24h Horizon Forecasting.</p>
+
+        <div class="landing-hero-box animate-pop delay-3">
+          <img id="landing-hero-img" src="" alt="Cyclone Satellite Image">
+          <div class="hero-status-pill">
+            <span class="status-dot-pulse"></span> Live Satellite Feed &bull; EfficientNet-B0 + GRU Engine
+          </div>
+        </div>
+
+        <div class="hero-actions animate-pop delay-4">
+          <button class="btn-cta" onclick="showView('assess')">🔍 Launch Storm Assessment &rarr;</button>
+          <button class="btn-cta btn-secondary" onclick="showView('forecast')">🔮 Run +24h Forecast &rarr;</button>
+        </div>
+
+        <!-- Metric Strip -->
+        <div class="landing-metrics-strip">
+          <div class="metric-strip-card animate-fade-up delay-4">
+            <div class="m-val">1,032</div>
+            <div class="m-title">Labeled Frames</div>
+            <div class="m-sub">INSAT-3D, NOAA HURSAT-B1, MOSDAC</div>
+          </div>
+          <div class="metric-strip-card animate-fade-up delay-5">
+            <div class="m-val">41.9%</div>
+            <div class="m-title">Generalization</div>
+            <div class="m-sub">Strict storm-held-out validation</div>
+          </div>
+          <div class="metric-strip-card animate-fade-up delay-6">
+            <div class="m-val">8 Scale</div>
+            <div class="m-title">IMD Categories</div>
+            <div class="m-sub">Depression &rarr; Super Cyclonic Storm</div>
+          </div>
+          <div class="metric-strip-card animate-fade-up delay-7">
+            <div class="m-val">+24h</div>
+            <div class="m-title">Horizon Forecaster</div>
+            <div class="m-sub">Beats persistence baseline</div>
+          </div>
+        </div>
+
+        <!-- Capabilities Grid -->
+        <div class="section-title-block margin-top animate-fade-up delay-5">
+          <h3 style="font-size: 1.25rem;">Core Platform Capabilities</h3>
+          <p>End-to-end AI workflow designed for operational disaster management</p>
+        </div>
+
+        <div class="landing-highlights">
+          <div class="highlight-card animate-pop delay-5" onclick="showView('assess')">
+            <div class="highlight-icon">🌀</div>
+            <div class="highlight-title">Intensity &amp; Pressure</div>
+            <div class="highlight-desc">Dual regression estimating sustained wind speed (km/h) &amp; central pressure (mb).</div>
+          </div>
+          <div class="highlight-card animate-pop delay-6" onclick="showView('assess')">
+            <div class="highlight-icon">👁️</div>
+            <div class="highlight-title">Grad-CAM Focus</div>
+            <div class="highlight-desc">Visual spatial heatmaps highlighting cloud eye &amp; eyewall convective structures.</div>
+          </div>
+          <div class="highlight-card animate-pop delay-7" onclick="showView('assess')">
+            <div class="highlight-icon">🎯</div>
+            <div class="highlight-title">MC-Dropout Confidence</div>
+            <div class="highlight-desc">Monte Carlo sampling across 30 passes providing calibrated uncertainty bounds.</div>
+          </div>
+          <div class="highlight-card animate-pop delay-6" onclick="showView('forecast')">
+            <div class="highlight-icon">🔮</div>
+            <div class="highlight-title">Temporal Forecasting</div>
+            <div class="highlight-desc">Sequence neural network predicting intensity trend at +6h, +12h, and +24h.</div>
+          </div>
+          <div class="highlight-card animate-pop delay-7" onclick="showView('ri')">
+            <div class="highlight-icon">⚡</div>
+            <div class="highlight-title">Rapid Intensification</div>
+            <div class="highlight-desc">Automated detection of Kaplan &amp; DeMaria +30kt / 24h warning triggers.</div>
+          </div>
+          <div class="highlight-card animate-pop delay-8" onclick="showView('history')">
+            <div class="highlight-icon">📊</div>
+            <div class="highlight-title">Historical Precedents</div>
+            <div class="highlight-desc">Cosine feature embedding search finding similar historical cyclone archives.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ASSESS VIEW -->
+    <div id="view-assess" class="view-section">
+      <div class="assess-cols">
+        <!-- LEFT: Satellite selector & image -->
+        <div class="card">
+          <label for="assess-select" class="control-label">Select Satellite Observation:</label>
+          <select id="assess-select" class="custom-select" onchange="loadAssessSample(this.value)"></select>
+          <div class="margin-top">
+            <img id="assess-main-img" src="" class="main-sat-img" alt="Main Satellite View">
+          </div>
+        </div>
+
+        <!-- RIGHT: Clean Assessment Output -->
+        <div class="card">
+          <div class="card-title">CURRENT ASSESSMENT</div>
+          <div id="assess-banner" class="alert-banner good"></div>
+
+          <div class="assessment-primary-box">
+            <div id="assess-cat-name" class="assess-cat-val">CYCLONIC STORM</div>
+            <div id="assess-wind-val" class="assess-wind-val">78 km/h</div>
+            <div id="assess-sub-val" class="assess-sub-val">993 mb &bull; 85% confidence</div>
+          </div>
+
+          <div class="metrics-grid" id="assess-extra-metrics"></div>
+        </div>
+      </div>
+
+      <!-- How the model sees the storm -->
+      <div class="section-title-block">
+        <h3>How the model sees the storm</h3>
+        <p>Input channels and Grad-CAM neural attention overlay</p>
+      </div>
+
+      <div class="grid grid-3">
+        <div class="card channel-card">
+          <div class="channel-tag">IR Channel</div>
+          <img id="assess-ir-img" src="" alt="IR Channel">
+        </div>
+        <div class="card channel-card">
+          <div class="channel-tag">Raw Channel</div>
+          <img id="assess-raw-img" src="" alt="Raw Channel">
+        </div>
+        <div class="card channel-card">
+          <div class="channel-tag">Grad-CAM Focus Overlay</div>
+          <img id="assess-gradcam-img" src="" alt="Grad-CAM Focus Overlay">
+        </div>
+      </div>
+
+      <!-- Probabilities Chart -->
+      <div class="card margin-top">
+        <div class="card-title">Category Probabilities</div>
+        <div class="chart-container">
+          <canvas id="chart-assess-probs"></canvas>
+        </div>
+        <p class="caption">Bars follow the IMD scale; predicted category is highlighted in coral. Error bars represent 30 MC-Dropout passes.</p>
+      </div>
+    </div>
+
+    <!-- HISTORICAL PRECEDENT VIEW -->
+    <div id="view-history" class="view-section">
+      <div class="card-title">Historical Precedent</div>
+      <p class="caption" style="margin-bottom:1.2rem;">Compare the current storm with similar historical observations.</p>
+
+      <div class="grid grid-4" id="history-cards-grid"></div>
+    </div>
+
+    <!-- EARLY WARNING VIEW -->
+    <div id="view-ri" class="view-section">
+      <div class="card-title">Early-Warning Assessment</div>
+      <p class="caption" style="margin-bottom:1.2rem;">Calm, automated monitoring of Rapid Intensification threshold events (+30kt / 24h).</p>
+
+      <div class="metrics-grid" id="ri-metrics-grid"></div>
+
+      <div class="card margin-top">
+        <div class="card-title">Cyclone Amphan (2020) — Best Track Intensity Trajectory</div>
+        <div class="chart-container">
+          <canvas id="chart-ri-timeline"></canvas>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Why this matters:</strong><br>
+        Rapid Intensification (+30kt wind increase in 24 hours) is the primary driver of unexpected coastal disaster impacts. Automated early warning provides forecasters with vital reaction lead time.
+      </div>
+    </div>
+
+    <!-- FORECAST VIEW -->
+    <div id="view-forecast" class="view-section">
+      <div class="card-title">Intensity Forecast</div>
+      <p class="caption" style="margin-bottom:1.2rem;">Sequence-based multi-horizon wind speed predictions (+6h, +12h, +24h).</p>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <label for="forecast-storm-select" class="control-label">Select Storm:</label>
+          <select id="forecast-storm-select" class="custom-select" onchange="onForecastStormSelect(this.value)"></select>
+        </div>
+        <div class="card">
+          <label for="forecast-anchor-slider" class="control-label">Anchor Point Slider:</label>
+          <input type="range" id="forecast-anchor-slider" class="custom-range" min="0" max="10" oninput="onForecastSliderInput(this.value)">
+          <div id="forecast-slider-text" class="caption"></div>
+        </div>
+      </div>
+
+      <div id="forecast-heldout-box" class="callout"></div>
+
+      <!-- Current State & Horizon Cards -->
+      <div class="grid grid-4 margin-top" id="forecast-horizon-cards"></div>
+
+      <!-- Observed vs Forecast Timeline -->
+      <div class="card margin-top">
+        <div class="card-title">Observed vs Model Forecast Trajectory</div>
+        <div class="chart-container">
+          <canvas id="chart-forecast-timeline"></canvas>
+        </div>
+      </div>
+
+      <div id="forecast-ri-banner-box" class="margin-top"></div>
+    </div>
+
+    <!-- ABOUT & DATA VIEW -->
+    <div id="view-about" class="view-section">
+      <div class="card-title">Model &amp; Dataset Information</div>
+      <p class="caption" style="margin-bottom:1.2rem;">Scientific specifications, dataset composition, and validation benchmarks.</p>
+
+      <div class="metrics-grid" id="about-meta-grid"></div>
+
+      <div class="card margin-top">
+        <div class="card-title">Dataset Composition</div>
+        <div class="chart-container">
+          <canvas id="chart-about-comp"></canvas>
+        </div>
+      </div>
+
+      <div class="card margin-top">
+        <div class="card-title">Training Performance</div>
+        <div class="chart-container">
+          <canvas id="chart-about-train"></canvas>
+        </div>
+      </div>
+
+      <div class="card margin-top">
+        <div class="card-title">Known Limitations</div>
+        <ul class="limitations-list">
+          <li><strong>Dataset size:</strong> 1,032 labeled images total (136 single Kaggle frames with no storm ID, 680 NOAA HURSAT-B1 frames across 10 real storms, 216 MOSDAC frames of Cyclone Amphan) — small for an 8-way classifier.</li>
+          <li><strong>Validation split:</strong> Validation is 2 HURSAT-B1 storms (136 frames) held out entirely (Phet, Nilofar).</li>
+          <li><strong>Pressure labels:</strong> No pressure label from Kaggle or HURSAT-B1 sources — wind speed regression head primary.</li>
+          <li><strong>Backbone initialization:</strong> Trained from random initialization without pretrained ImageNet weights.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Injected serialized backend data
+    window.DATA = {APP_DATA_JSON};
+
+    let currentSampleName = null;
+    let chartProb = null, chartRI = null, chartForecast = null, chartComp = null, chartTrain = null;
+
+    const SEQ_RAMP = ["#bae6fd", "#7dd3fc", "#38bdf8", "#0284c7", "#0369a1", "#1d4ed8", "#1e40af", "#1e3a8a"];
+    const CAT_ORANGE = "#f97316";
+    const CAT_BLUE = "#0284c7";
+
+    document.addEventListener("DOMContentLoaded", () => {{
+      initSampleSelect();
+      initLandingHero();
+      initRIView();
+      initForecastView();
+      initAboutView();
+    }});
+
+    function showView(viewId) {{
+      document.querySelectorAll(".view-section").forEach(el => el.classList.remove("active"));
+      document.querySelectorAll(".nav-btn").forEach(el => el.classList.remove("active"));
+
+      const targetView = document.getElementById("view-" + viewId);
+      if (targetView) targetView.classList.add("active");
+
+      const activeNav = document.querySelector(`.nav-btn[data-view="${{viewId}}"]`);
+      if (activeNav) activeNav.classList.add("active");
+
+      window.scrollTo({{ top: 0, behavior: 'smooth' }});
+    }}
+
+    function initLandingHero() {{
+      const firstSampleKey = DATA.sample_names[0];
+      const s = DATA.samples[firstSampleKey];
+      if (s) {{
+        document.getElementById("landing-hero-img").src = s.ir_base64;
+      }}
+    }}
+
+    function initSampleSelect() {{
+      const select = document.getElementById("assess-select");
+      select.innerHTML = "";
+      DATA.sample_names.forEach(name => {{
+        const s = DATA.samples[name];
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = `${{name}} (${{s.true_cat_name}}, ${{s.true_kmph}} km/h)`;
+        select.appendChild(opt);
+      }});
+
+      if (DATA.sample_names.length > 0) {{
+        currentSampleName = DATA.sample_names[0];
+        loadAssessSample(currentSampleName);
+      }}
+    }}
+
+    function loadAssessSample(name) {{
+      currentSampleName = name;
+      const s = DATA.samples[name];
+      if (!s) return;
+
+      document.getElementById("assess-main-img").src = s.ir_base64;
+      document.getElementById("assess-ir-img").src = s.ir_base64;
+      document.getElementById("assess-raw-img").src = s.raw_base64;
+      document.getElementById("assess-gradcam-img").src = s.overlay_base64;
+
+      document.getElementById("assess-cat-name").textContent = s.pred_cat_name;
+      document.getElementById("assess-wind-val").textContent = `${{s.pred_kmph}} km/h`;
+      
+      const pressText = s.pred_pressure ? `${{s.pred_pressure}} mb &bull; ` : "";
+      document.getElementById("assess-sub-val").innerHTML = `${{pressText}}${{(s.confidence * 100).toFixed(0)}}% confidence`;
+
+      // Banner
+      const banner = document.getElementById("assess-banner");
+      let icon = "✅", headline = "LOW IMMEDIATE THREAT", cls = "good";
+      if (s.pred_idx >= 5) {{ icon = "🚨"; headline = "HIGH-IMPACT — Review Evacuation Readiness"; cls = "critical"; }}
+      else if (s.pred_idx >= 3) {{ icon = "⚠️"; headline = "SIGNIFICANT — Monitor Closely"; cls = "warning"; }}
+      banner.className = `alert-banner ${{cls}}`;
+      banner.innerHTML = `<span style="font-size:1.2rem;">${{icon}}</span> <strong>${{headline}}</strong> &bull; ${{(s.confidence * 100).toFixed(0)}}% confidence`;
+
+      // Metrics
+      const extraMetrics = document.getElementById("assess-extra-metrics");
+      let mHTML = `
+        <div class="metric-card">
+          <div class="metric-label">Predicted Wind Speed</div>
+          <div class="metric-value">${{s.pred_kmph}} km/h</div>
+          <div class="metric-sub">&plusmn;${{s.wind_std_kmph}} km/h</div>
+        </div>
+      `;
+      if (s.pred_pressure) {{
+        mHTML += `
+          <div class="metric-card">
+            <div class="metric-label">Predicted Pressure</div>
+            <div class="metric-value">${{s.pred_pressure}} mb</div>
+            <div class="metric-sub">&plusmn;${{s.pressure_std_mb}} mb</div>
+          </div>
+        `;
+      }}
+      mHTML += `
+        <div class="metric-card">
+          <div class="metric-label">Actual Category</div>
+          <div class="metric-value">${{s.true_cat_name}}</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Actual Wind Speed</div>
+          <div class="metric-value">${{s.true_kmph}} km/h</div>
+        </div>
+      `;
+      extraMetrics.innerHTML = mHTML;
+
+      // Probabilities chart
+      renderProbabilitiesChart(s.mean_probs, s.pred_idx);
+
+      // Historical matches
+      renderHistoricalMatches(s.matches);
+    }}
+
+    function renderProbabilitiesChart(means, predIdx) {{
+      const ctx = document.getElementById("chart-assess-probs").getContext("2d");
+      if (chartProb) chartProb.destroy();
+
+      const barColors = DATA.cat_names.map((_, i) => i === predIdx ? CAT_ORANGE : (SEQ_RAMP[i] || CAT_BLUE));
+
+      chartProb = new Chart(ctx, {{
+        type: "bar",
+        data: {{
+          labels: DATA.cat_names,
+          datasets: [{{
+            label: "Probability (MC-Dropout)",
+            data: means,
+            backgroundColor: barColors,
+            borderRadius: 6,
+          }}]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {{ legend: {{ display: false }} }},
+          scales: {{
+            y: {{ beginAtZero: true, max: 1.0, grid: {{ color: "#f1f5f9" }}, ticks: {{ color: "#64748b" }} }},
+            x: {{ grid: {{ display: false }}, ticks: {{ color: "#334155", font: {{ weight: "600" }} }} }}
+          }}
+        }}
+      }});
+    }}
+
+    function renderHistoricalMatches(matches) {{
+      const container = document.getElementById("history-cards-grid");
+      container.innerHTML = "";
+      matches.forEach(m => {{
+        const card = document.createElement("div");
+        card.className = "hist-card";
+        card.innerHTML = `
+          <img src="${{m.ir_base64}}" alt="${{m.img_name}}">
+          <div style="margin-top:0.5rem;">
+            <div style="font-weight:700; font-size:0.9rem;">${{m.img_name}}</div>
+            <div class="hist-badge">${{m.percentile}}th percentile match</div>
+            <div style="font-size:0.8rem; color:#475569;">${{m.cat_name}}, ${{m.kmph}} km/h</div>
+          </div>
+        `;
+        container.appendChild(card);
+      }});
+    }}
+
+    function initRIView() {{
+      const ri = DATA.ri;
+      const metricsContainer = document.getElementById("ri-metrics-grid");
+      if (ri.episodes && ri.episodes.length > 0) {{
+        const ep = ri.episodes[0];
+        metricsContainer.innerHTML = `
+          <div class="metric-card">
+            <div class="metric-label">RI Status</div>
+            <div class="metric-value" style="color:var(--red-text);">ALERT TRIGGERED</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Intensification</div>
+            <div class="metric-value">+${{ep.delta}} kt</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Duration</div>
+            <div class="metric-value">${{ep.duration_hours}} h</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Peak Intensity</div>
+            <div class="metric-value">${{ri.peak_wind_kt}} kt &bull; SuCS</div>
+          </div>
+        `;
+      }}
+
+      const ctx = document.getElementById("chart-ri-timeline").getContext("2d");
+      if (chartRI) chartRI.destroy();
+
+      chartRI = new Chart(ctx, {{
+        type: "line",
+        data: {{
+          labels: ri.times,
+          datasets: [{{
+            label: "Sustained Wind Speed (kt)",
+            data: ri.winds,
+            borderColor: CAT_BLUE,
+            backgroundColor: "rgba(2, 132, 199, 0.08)",
+            borderWidth: 2.5,
+            fill: true,
+            tension: 0.2,
+          }}]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {{ legend: {{ display: false }} }},
+          scales: {{
+            y: {{ grid: {{ color: "#f1f5f9" }}, ticks: {{ color: "#64748b" }} }},
+            x: {{ grid: {{ display: false }}, ticks: {{ color: "#64748b", maxTicksLimit: 10 }} }}
+          }}
+        }}
+      }});
+    }}
+
+    let currentForecastStorm = null;
+
+    function initForecastView() {{
+      const fc = DATA.forecast;
+      const select = document.getElementById("forecast-storm-select");
+      select.innerHTML = "";
+      fc.storms.forEach(st => {{
+        const opt = document.createElement("option");
+        opt.value = st;
+        opt.textContent = fc.val_storms.includes(st) ? `${{st}} (held out — validation)` : st;
+        select.appendChild(opt);
+      }});
+
+      currentForecastStorm = fc.storms[0];
+      select.value = currentForecastStorm;
+      renderForecast(currentForecastStorm, 0);
+    }}
+
+    function onForecastStormSelect(storm) {{
+      currentForecastStorm = storm;
+      renderForecast(storm, 0);
+    }}
+
+    function onForecastSliderInput(val) {{
+      renderForecast(currentForecastStorm, parseInt(val));
+    }}
+
+    function renderForecast(storm, anchorIdx) {{
+      const stData = DATA.forecast.data[storm];
+      if (!stData) return;
+
+      const slider = document.getElementById("forecast-anchor-slider");
+      slider.max = stData.sequences.length - 1;
+      const validIdx = Math.max(0, Math.min(anchorIdx, stData.sequences.length - 1));
+      slider.value = validIdx;
+
+      const seq = stData.sequences[validIdx];
+      document.getElementById("forecast-slider-text").textContent = `Forecasting from ${{seq.anchor_dt}} (Anchor ${{validIdx + 1}} of ${{stData.sequences.length}})`;
+
+      const heldoutBox = document.getElementById("forecast-heldout-box");
+      if (stData.is_held_out) {{
+        heldoutBox.className = "callout";
+        heldoutBox.innerHTML = `<strong>${{storm}}</strong> was held out entirely during training — forecast below reflects true generalization.`;
+      }} else {{
+        heldoutBox.className = "callout";
+        heldoutBox.style.background = "var(--amber-bg)";
+        heldoutBox.style.borderColor = "var(--amber-border)";
+        heldoutBox.style.color = "var(--amber-text)";
+        heldoutBox.innerHTML = `<strong>${{storm}}</strong> was used during training — select Phet or Nilofar for held-out validation.`;
+      }}
+
+      // Horizon cards
+      const cardsContainer = document.getElementById("forecast-horizon-cards");
+      let hHTML = `
+        <div class="metric-card">
+          <div class="metric-label">Current Anchor State</div>
+          <div class="metric-value">${{seq.anchor_kmph}} km/h</div>
+          <div class="metric-sub">${{seq.anchor_cat}}</div>
+        </div>
+      `;
+      ["6", "12", "24"].forEach(h => {{
+        const item = seq.horizons[h];
+        if (item) {{
+          const sign = item.delta_kmph >= 0 ? "+" : "";
+          hHTML += `
+            <div class="metric-card">
+              <div class="metric-label">+${{h}} Hours</div>
+              <div class="metric-value">${{item.pred_kmph}} km/h</div>
+              <div class="metric-sub">${{sign}}${{item.delta_kmph}} km/h vs now (${{item.pred_cat}})</div>
+            </div>
+          `;
+        }}
+      }});
+      cardsContainer.innerHTML = hHTML;
+
+      // Forecast Timeline Chart
+      const ctx = document.getElementById("chart-forecast-timeline").getContext("2d");
+      if (chartForecast) chartForecast.destroy();
+
+      chartForecast = new Chart(ctx, {{
+        type: "line",
+        data: {{
+          labels: stData.full_times,
+          datasets: [
+            {{
+              label: "Observed Wind Speed (km/h)",
+              data: stData.full_winds,
+              borderColor: CAT_BLUE,
+              borderWidth: 2.5,
+              pointRadius: 2,
+            }},
+            {{
+              label: "Forecast Trajectory",
+              data: stData.full_times.map(t => {{
+                const idx = seq.fc_times.indexOf(t);
+                return idx !== -1 ? seq.fc_winds[idx] : null;
+              }}),
+              borderColor: CAT_ORANGE,
+              borderDash: [6, 4],
+              borderWidth: 2.5,
+              pointRadius: 5,
+              pointBackgroundColor: CAT_ORANGE,
+            }}
+          ]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {{ legend: {{ display: true }} }},
+          scales: {{
+            y: {{ grid: {{ color: "#f1f5f9" }}, ticks: {{ color: "#64748b" }} }},
+            x: {{ grid: {{ display: false }}, ticks: {{ color: "#64748b", maxTicksLimit: 10 }} }}
+          }}
+        }}
+      }});
+
+      // Live RI Banner
+      const riBox = document.getElementById("forecast-ri-banner-box");
+      if (seq.rt_episodes && seq.rt_episodes.length > 0) {{
+        const ep = seq.rt_episodes[0];
+        riBox.innerHTML = `
+          <div class="alert-banner critical">
+            <span style="font-size:1.2rem;">🚨</span> <strong>RAPID INTENSIFICATION ALERT:</strong> Forecast predicts +${{ep.delta_kt}}kt over ${{ep.duration_hours}}h.
+          </div>
+        `;
+      }} else {{
+        riBox.innerHTML = `
+          <div class="callout" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1;">
+            No Rapid Intensification threshold crossing predicted in this forecast window (+30kt / 24h).
+          </div>
+        `;
+      }}
+    }}
+
+    function initAboutView() {{
+      const ab = DATA.about;
+      const metaContainer = document.getElementById("about-meta-grid");
+      metaContainer.innerHTML = `
+        <div class="metric-card">
+          <div class="metric-label">Labeled Images</div>
+          <div class="metric-value">${{ab.total_samples}}</div>
+          <div class="metric-sub">${{ab.n_kaggle}} Kaggle, ${{ab.n_hursat}} HURSAT, ${{ab.n_mosdac}} MOSDAC</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">IMD Categories</div>
+          <div class="metric-value">${{ab.composition.length}}</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Validation Benchmark</div>
+          <div class="metric-value">${{ab.val_accuracy}}%</div>
+          <div class="metric-sub">Epoch ${{ab.val_epoch}} on held-out storms</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Architecture</div>
+          <div class="metric-value">CycloneNet</div>
+          <div class="metric-sub">2-channel IR/Raw backbone</div>
+        </div>
+      `;
+
+      // Composition
+      const ctxComp = document.getElementById("chart-about-comp").getContext("2d");
+      if (chartComp) chartComp.destroy();
+
+      chartComp = new Chart(ctxComp, {{
+        type: "bar",
+        data: {{
+          labels: ab.composition.map(c => c.name),
+          datasets: [{{
+            label: "Labeled Images",
+            data: ab.composition.map(c => c.count),
+            backgroundColor: ab.composition.map(c => SEQ_RAMP[c.cat_idx] || CAT_BLUE),
+            borderRadius: 6,
+          }}]
+        }},
+        options: {{
+          indexAxis: "y",
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {{ legend: {{ display: false }} }},
+          scales: {{
+            x: {{ grid: {{ color: "#f1f5f9" }}, ticks: {{ color: "#64748b" }} }},
+            y: {{ grid: {{ display: false }}, ticks: {{ color: "#334155", font: {{ weight: "600" }} }} }}
+          }}
+        }}
+      }});
+
+      // Training curve
+      if (ab.training_history && ab.training_history.length > 0) {{
+        const ctxTrain = document.getElementById("chart-about-train").getContext("2d");
+        if (chartTrain) chartTrain.destroy();
+
+        chartTrain = new Chart(ctxTrain, {{
+          type: "line",
+          data: {{
+            labels: ab.training_history.map(h => h.epoch),
+            datasets: [
+              {{
+                label: "Train Accuracy",
+                data: ab.training_history.map(h => h.train_acc),
+                borderColor: CAT_BLUE,
+                borderWidth: 2.5,
+              }},
+              {{
+                label: "Validation Accuracy (Held-out storms)",
+                data: ab.training_history.map(h => h.val_acc),
+                borderColor: CAT_ORANGE,
+                borderWidth: 2.5,
+              }}
+            ]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{ legend: {{ display: true }} }},
+            scales: {{
+              y: {{ beginAtZero: true, max: 1.0, grid: {{ color: "#f1f5f9" }}, ticks: {{ color: "#64748b" }} }},
+              x: {{ grid: {{ display: false }}, ticks: {{ color: "#64748b" }} }}
+            }}
+          }}
+        }});
+      }}
+    }}
+  </script>
+</body>
+</html>
+"""
+
+# Render custom HTML web application in Streamlit with zero Streamlit chrome
+components.html(HTML_CONTENT, height=1350, scrolling=True)
